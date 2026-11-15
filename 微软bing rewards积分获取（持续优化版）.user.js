@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         微软积分（持续修复版·优化）
+// @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.6.0
+// @version      1.7.0
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；连续 3 次确认全部完成后次日再运行；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -38,6 +38,10 @@
 // @updateURL    https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js
 // @downloadURL  https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js
 // @tips         此脚本为开源免费使用，请勿购买
+// @tag          微软积分
+// @tag          每日签到
+// @tag          自动任务
+// @tag          PushPlus
 // ==/UserScript==
 
 /* global GM_cookie, GM_getValue, GM_setValue, GM_xmlhttpRequest, GM_log, GM_info, GM_notification, GM_openInTab */
@@ -2924,6 +2928,25 @@ Notice:
             Utils.cacheClear();
         },
 
+        /**
+         * 启动间隔自检（借鉴上游 1.4.x 的 checkStartupGap）
+         * 定时脚本被宿主跳过、扩展被禁用、浏览器长期未开时，脚本根本跑不起来，
+         * 也就没机会推送任何东西。这里在下次成功启动时补一条告警，
+         * 让"其实好几天没跑"这件事能被看见，而不是等用户自己发现积分不涨。
+         * 时间戳写在 runAll 真正开始执行处，避免"初始化了但没跑"掩盖问题。
+         * @returns {void}
+         */
+        checkStartupGap() {
+            const last = Number(GM_getValue("Config.lastRunTs", 0)) || 0;
+            if (!last) return;
+            const gapH = (Date.now() - last) / 3600000;
+            if (gapH < 12) return;
+            const pad = (n) => String(n).padStart(2, "0");
+            const when = new Date(last);
+            const stamp = `${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}:${pad(when.getMinutes())}`;
+            Utils.notifyError("startupGap", `脚本已 ${gapH.toFixed(1)} 小时未成功运行（上次 ${stamp}）。常见原因：定时被宿主跳过、扩展被禁用、浏览器未开启。`);
+        },
+
         save() {
             GM_setValue("Config.tasks", {
                 sign: this.signDate, read: this.readDate,
@@ -3614,6 +3637,9 @@ Notice:
                 return;
             }
             this.running = true;
+            // 启动间隔自检：上次成功运行距今超过 12 小时就先补一条告警（每天最多一次）
+            this.checkStartupGap();
+            GM_setValue("Config.lastRunTs", Date.now());
             RewardsAuto.state.pc401 = false;
             this._completionEvaluated = false;
             try {

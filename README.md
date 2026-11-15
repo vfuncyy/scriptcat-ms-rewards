@@ -1,9 +1,10 @@
-# 微软积分（持续修复版·优化）
+# 微软bing rewards积分获取（持续优化版）
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.6.0 · License：MIT
+> 版本：v1.7.0 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
+> v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
 
 ---
 
@@ -45,7 +46,7 @@
 ## 📦 安装使用
 
 1. 浏览器安装 [脚本猫 ScriptCat](https://scriptcat.org/) 扩展（Chrome / Edge / Firefox）；
-2. 安装脚本：在 [ScriptCat 商店](https://scriptcat.org/zh-CN/script-show-page/9092) 点「安装」，或把 `微软积分（持续修复版·优化）.user.js` 导入脚本猫（拖入扩展或新建脚本粘贴全文）；
+2. 安装脚本：在 [ScriptCat 商店](https://scriptcat.org/zh-CN/script-show-page/9092) 点「安装」，或把 `微软bing rewards积分获取（持续优化版）.user.js` 导入脚本猫（拖入扩展或新建脚本粘贴全文）；
 3. 首次使用：脚本菜单 →「🔑 手动授权」→ 登录微软账户完成 OAuth 授权；
 4. 之后由 crontab（`*/20 * * * *`）自动运行，无需人工干预；
 5. 自动更新：脚本已内置 `@updateURL`/`@downloadURL`，在脚本猫中开启「检查更新」后，新发布的 Release 会自动拉取升级（随附的 `script.options.json` 已默认开启）。
@@ -80,10 +81,11 @@
 
 ```
 scriptcat-ms-rewards/
-├── 微软积分（持续修复版·优化）.user.js   # 主脚本（直接导入脚本猫）
+├── 微软bing rewards积分获取（持续优化版）.user.js   # 主脚本（直接导入脚本猫）
 ├── script.options.json                 # 脚本猫选项元数据（含 @connect 声明）
 ├── script.storage.json                 # 存储快照示例（令牌已脱敏置空）
 ├── 主页实测与改进清单.md                # 2026-11 新版站点实测证据与 16 项改进清单
+├── 参考脚本对比与采纳建议.md            # 与商店同类脚本（7354/8787/8491）的能力差与采纳路线
 └── README.md
 ```
 
@@ -94,6 +96,13 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v1.7.0（更名 + 参考脚本对照结论）
+
+- ✅ 脚本更名为 **微软bing rewards积分获取（持续优化版）**；`@storageName` 未变，升级不丢配置与登录态
+- ✅ 新增 `@tag` 元数据（ScriptCat 商店标签从代码解析）
+- ✅ 新增启动间隔自检 `checkStartupGap()`：距上次成功运行 ≥12 小时时补一条告警（同类每天最多推一次），用于发现「定时被宿主跳过 / 扩展被禁用 / 浏览器长期未开」
+- 📄 新增 `参考脚本对比与采纳建议.md`：对照商店同类脚本 7354（页面助手）、8787（后台 + CDP）、8491（本脚本上游）的能力差，给出 7 项采纳路线
 
 ### v1.6.0（适配 2026-11 新版站点）
 
