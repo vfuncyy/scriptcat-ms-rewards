@@ -34,6 +34,11 @@
 
 也可在脚本设置面板 `Notice` 分组中直接填写 `PushPlus Token`。
 
+## ⬇️ 下载
+
+- **最新版直链**：[microsoft-rewards-scriptcat.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js)
+- 历史版本：[Releases 页面](https://github.com/vfuncyy/scriptcat-ms-rewards/releases)
+
 ## 📦 安装使用
 
 1. 浏览器安装 [脚本猫 ScriptCat](https://scriptcat.org/) 扩展（Chrome / Edge / Firefox）；
