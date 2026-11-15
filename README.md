@@ -44,6 +44,8 @@
 - 历史版本：[Releases 页面](https://github.com/vfuncyy/scriptcat-ms-rewards/releases)
 
 > 脚本头部已声明 `@updateURL` / `@downloadURL`（始终指向最新 Release 资产）：在脚本猫中开启「检查更新」即可自动升级到最新版。
+>
+> 商店版本从 GitHub 自动同步。
 
 ## 📦 安装使用
 
