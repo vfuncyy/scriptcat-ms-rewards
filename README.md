@@ -2,8 +2,8 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.5.1 · License：MIT
-> 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块。
+> 版本：v1.6.0 · License：MIT
+> 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 
 ---
 
@@ -11,8 +11,8 @@
 
 - **签到**：PC 端 + APP 端双通道每日签到，失败自动补签
 - **阅读**：新闻阅读任务，动态解析 Server Action 上报
-- **搜索**：真实热词池搜索 + 随机间隔，模拟真人行为；配额三级回退获取
-- **任务**：每日任务集、活动卡片、待领取积分、连续签到奖励自动领取
+- **搜索**：真实热词池搜索 + 随机间隔，模拟真人行为；配额取 DAPI 搜索任务与 dashboard 服务端数据
+- **任务**：每日任务集、活动卡片、待领取积分（Server Action 自动领取）、连续签到奖励自动领取
 - **推送**：半程进度提醒、每日日报、异常提醒
 - **调度**：crontab 每 20 分钟后台运行；运行锁防并发；连续 3 天全部完成后次日自动跳过
 - **调试**：Token 状态、调试日志环形缓冲、诊断数据一键导出
@@ -66,10 +66,11 @@
 | 元数据头 | `@connect` 声明微软业务域、热词接口域与 pushplus.plus；`@match` 覆盖 OAuth 回调页与 Bing/Rewards 页面 |
 | UserConfig | 设置面板三组配置，与菜单读写同一批存储键 |
 | 登录回调捕获 | 在 `oauth20_desktop.srf` 截获 OAuth code，兑换并续期 access token |
-| RewardsAuto | UA / offerId / 搜索词池 / 跳过规则等常量与运行状态 |
+| RewardsAuto | UA / offerId / 搜索词池 / 跳过规则等常量与运行状态（含兜底的领取 action id） |
 | PushPlus | 推送配置读取与就绪判定（endpoint、token、开关） |
 | Utils | 缓存（TTL+单飞）、安全 UI 封装、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()` |
-| API 层 | token 生命周期、签到、阅读（Server Action 动态解析）、搜索（热词 + 配额回退）、区域检查 |
+| API 层 | token 生命周期、**dashboard 服务端渲染解析**（余额/等级/连签/待领取）、DAPI 511 字段适配、阅读与卡片（Server Action 动态解析）、搜索（热词 + 配额）、区域检查 |
+| 自动领取 | 两跳定位懒加载 chunk 里的 `reportClaimAllPoints` action id → `POST /dashboard`（`Next-Action` 头 + `[]`）→ 余额复核 |
 | TaskManager | 运行锁、完成调度、七项任务执行、报表汇总、收尾推送 |
 | 菜单系统 | 授权 / 兑换 / 状态 / 立即运行 / 推送配置 / 测试通知 / 调试导出 |
 | init | crontab 注册；Bing 搜索页跳过初始化；登录回调页立即兑换 token |
@@ -81,6 +82,7 @@ scriptcat-ms-rewards/
 ├── 微软积分（持续修复版·优化）.user.js   # 主脚本（直接导入脚本猫）
 ├── script.options.json                 # 脚本猫选项元数据（含 @connect 声明）
 ├── script.storage.json                 # 存储快照示例（令牌已脱敏置空）
+├── 主页实测与改进清单.md                # 2026-11 新版站点实测证据与 16 项改进清单
 └── README.md
 ```
 
@@ -91,6 +93,22 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v1.6.0（适配 2026-11 新版站点）
+
+微软 Rewards 站点已于 2026-11-13 改版为 Next.js 纯服务端渲染（RSC），旧接口大面积下线。本版按实测证据逐条修复：
+
+- ❌ 移除 `/api/getuserinfo` 全链（实测 401）：配额、余额、完成状态回查改用 **dashboard 服务端渲染解析 + DAPI options=511**
+- ❌ 移除 `/api/reportactivity` 全链（实测 POST 401）与「老版 reportactivity」兜底策略，避免假成功
+- ❌ 移除 `/api/reportactivity` 相关的防伪 token 获取与诊断探测
+- ✅ 新增 `parseDashboardHtml()` / `rscText()` / `getDashboardData()`：从 `self.__next_f.push` 拼装 RSC 文本，解析余额、等级、每次搜索积分、连签天数、`pointClaim` 待领取积分、每日活动过期时间
+- ✅ 新增自动领取：两跳定位懒加载 chunk（`PointsClaimSidePanel`）中的 `reportClaimAllPoints` action id（**实测 id 为 42 位十六进制**，旧正则写死 40 位会漏匹配），`POST /dashboard` + `Next-Action` 头 + `[]` → RSC 返回 `1:true`；随后 DAPI 余额复核（实测 17511 → 17514，+3 到账）
+- ✅ DAPI 字段适配：服务端已不下发 `offerid/type/pointProgressMax` 到顶层，改从 `name` 与 `attributes` 读取，并按 offerId 规则推断类型（`_classifyOffer`）
+- ✅ 搜索配额改为 DAPI 搜索任务（`WW_search_*`，60/60）+ `pointsPerSearch`（3 分/次），不再依赖页面中文文案
+- ✅ 连签天数优先取 RSC `streakCounter`（实测 50 天）
+- ✅ 新增 `Sapphire_AppNewBonus_*` 四类 App 专属奖励统计（需在手机 App 内触发，脚本只统计不谎报）
+- ✅ 每日活动按 `Gamification_DailySet_*_<今日>_ChildN` 过滤，避免把次日预热项提前上报
+- ✅ `Config.engineVersion` 升到 1.6.0，升级时重置一次当日尝试状态
 
 ### v1.5.1
 

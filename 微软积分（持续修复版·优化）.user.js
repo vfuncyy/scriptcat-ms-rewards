@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软积分（持续修复版·优化）
 // @namespace    https://rewards.bing.com/
-// @version      1.5.1
+// @version      1.6.0
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；连续 3 次确认全部完成后次日再运行；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -142,7 +142,10 @@ Notice:
             offerIds: {
                 dailyCheckIn: "Gamification_Sapphire_DailyCheckIn",
                 readArticle: "ENUS_readarticle3_30points",
-            }
+            },
+            // 「可领取积分」的 Server Action ID（2026-11 实测值）。
+            // 站点每次部署都会换 ID，运行时优先从懒加载 chunk 动态解析，这里只作兜底。
+            claimActionId: "00491296f1d668ad46b65342c95cb9d72a62c1fa9d"
         },
         searchPool: [
             "what is the weather forecast tomorrow",
@@ -1261,50 +1264,9 @@ Notice:
             return -1;
         },
 
-        async getRequestVerificationToken(pageUrl = "https://rewards.bing.com/") {
-            try {
-                const cookie = await Utils.getCookieString(pageUrl);
-                const html = await Utils.xhr({
-                    url: pageUrl,
-                    headers: {
-                        "user-agent": RewardsAuto.ua.pc,
-                        "referer": "https://rewards.bing.com/",
-                        ...(cookie ? { "cookie": cookie } : {})
-                    },
-                    anonymous: false
-                });
-                const tokenMatch = html.match(/name=["']__RequestVerificationToken["'][^>]*value=["']([^"']+)["']/i)
-                    || html.match(/RequestVerificationToken.*?value=["']([^"']+)["']/i)
-                    || html.match(/"verificationToken"\s*:\s*"([^"]+)"/i)
-                    || html.match(/"__RequestVerificationToken"\s*:\s*"([^"]+)"/i);
-                return tokenMatch ? tokenMatch[1].replace(/&amp;/g, "&") : "";
-            } catch (e) {
-                Utils.log("🟡", `活动Token获取失败: ${e.message}`);
-                return "";
-            }
-        },
-
-        async reportActivity(offerId, hash, referer = "https://rewards.bing.com/") {
-            const token = await this.getRequestVerificationToken(referer);
-            if (!token) Utils.debug("report-activity", `活动Token缺失(${offerId})，上报可能被拒`);
-            const cookie = await Utils.getCookieString("https://rewards.bing.com/");
-            const params = new URLSearchParams({ id: offerId, hash: hash || "1", activityAmount: "1" });
-            if (token) params.set("__RequestVerificationToken", token);
-            const headers = {
-                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "user-agent": RewardsAuto.ua.pc,
-                "referer": referer,
-                "origin": "https://rewards.bing.com",
-                "x-requested-with": "XMLHttpRequest",
-                ...(cookie ? { "cookie": cookie } : {})
-            };
-            if (token) headers["RequestVerificationToken"] = token;
-            return await Utils.xhr({
-                method: "POST",
-                url: "https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest",
-                headers, data: params.toString(), anonymous: false
-            });
-        },
+        // 旧版网页上报链路（getRequestVerificationToken / reportActivity → /api/reportactivity）
+        // 已于 2026-11 站点下线（实测 POST 返回 401 旧版错误页），故整体移除；
+        // 需要上报的任务改走 Server Action（reportActivity/reportClaimAllPoints）或 cn.bing.com 的 rewardsapp 接口。
 
         async reportDailyActivity(searchUrl) {
             try {
@@ -1381,22 +1343,10 @@ Notice:
         },
 
         async signPC() {
-            try {
-                const res = await this.reportActivity("Gamification_DailyCheckIn", "1", "https://rewards.bing.com/");
-                Utils.debug("sign-pc", `响应: ${String(res).slice(0, 800)}`);
-                if (Utils.isJSON(res)) {
-                    const data = JSON.parse(res);
-                    return Number(data.points || data.response?.activity?.p || 0);
-                }
-            } catch (e) {
-                if (e.message?.includes("401")) {
-                    // 401 仅代表本次上报未被识别为已登录（冷启动后 cookie/防伪 token 未就绪常见），
-                    // 不等于网页会话失效：不置 pc401、不弹重新登录，改由搜索后计数器复核
-                    Utils.log("🟡", "PC签入上报被拒（HTTP 401），等待搜索后复核签到状态");
-                } else {
-                    Utils.log("🟡", `PC签入失败: ${e.message}`);
-                }
-            }
+            // 2026-11 版站点已下线 /api/reportactivity（实测 401 + 旧版错误页），
+            // PC 签到改由搜索行为触发服务端计数器（DailyCheckIn_Bing_CompletionCheck），
+            // 这里不发无效请求，交由 doSearch 之后的 recheckPCSign 复核。
+            Utils.debug("sign-pc", "旧版 PC 签到接口已下线，改由搜索触发服务端计数器");
             return -1;
         },
 
@@ -1483,15 +1433,19 @@ Notice:
                 const promotions = (Array.isArray(response.promotions) ? response.promotions : [])
                     .map(p => {
                         const a = p?.attributes || {};
+                        // 2026-11 起服务端不再返回 offerid/type/pointProgressMax：
+                        // 任务标识改由 name 承载（如 ENUS_readarticle3_30points_Default），
+                        // 类型需要按名称推断，进度上限 attributes.max 即该任务可得积分。
+                        const offerId = String(a.offerid || p?.name || "");
                         return {
-                            offerId: a.offerid || p?.name || "",
+                            offerId,
                             title: a.title || p?.name || "",
-                            type: String(a.type || "").toLowerCase(),
+                            type: String(a.type || "").toLowerCase() || this._classifyOffer(offerId),
                             hidden: String(a.hidden).toLowerCase() === "true",
                             complete: String(a.complete).toLowerCase() === "true",
                             progress: Number(a.progress ?? a.activityprogress ?? 0) || 0,
                             max: Number(a.max ?? a.activitymax ?? 0) || 0,
-                            points: Number(p?.pointProgressMax ?? a.pointmax ?? 0) || 0,
+                            points: Number(p?.pointProgressMax ?? a.pointmax ?? a.max ?? 0) || 0,
                             destination: a.destination || p?.destinationUrl || "",
                             hash: p?.hash || ""
                         };
@@ -1501,6 +1455,172 @@ Notice:
             } catch (e) {
                 Utils.log("🟡", `DAPI概览获取失败: ${e.message}`);
                 return false;
+            }
+        },
+
+        /**
+         * 按 offerId 推断任务类型（新版 DAPI 不再下发 type 字段）
+         * @param {string} offerId 任务标识
+         * @returns {string} 类型代号
+         */
+        _classifyOffer(offerId) {
+            const id = String(offerId || "");
+            if (/readarticle|read_?article/i.test(id)) return "msnreadearn";
+            if (/AppNewBonus/i.test(id)) return "appbonus";
+            if (/Gamification_DailySet_/i.test(id)) return "dailyset";
+            if (/DailyCheckIn_Bing_/i.test(id)) return "checkin";
+            if (/DailyCheckIn_Sapphire|DailyCheckIn$/i.test(id)) return "checkin";
+            if (/streak/i.test(id)) return "streak";
+            if (/search/i.test(id)) return "search";
+            return "";
+        },
+
+        /**
+         * 把 dashboard HTML 中的 RSC flight 片段拼装成可解析文本
+         * @param {string} html 页面 HTML
+         * @returns {string} 拼装后的文本
+         */
+        rscText(html) {
+            if (!html) return "";
+            const parts = [];
+            const re = /self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g;
+            let m;
+            while ((m = re.exec(String(html))) !== null) {
+                try { parts.push(JSON.parse(m[1])); } catch (_) {}
+            }
+            return parts.length ? parts.join("") : String(html);
+        },
+
+        /**
+         * 解析 dashboard 服务端渲染数据
+         * 说明：2026-11 版站点改为纯服务端渲染，旧 /api/getuserinfo 已返回 401，
+         *      余额/等级/连签/待领取积分都内联在 flight 片段中，这里统一提取。
+         * @param {string} html dashboard 页面 HTML
+         * @returns {Object} 解析结果（未命中为 null）
+         */
+        parseDashboardHtml(html) {
+            const out = {
+                balance: null, level: null, pointsPerSearch: null, streak: null,
+                pointClaim: null, lifetimeEarn: null, lifetimeSpend: null, dailySetExpiresAt: null
+            };
+            try {
+                const text = this.rscText(html);
+                const num = (re) => { const m = text.match(re); return m ? Number(m[1]) : null; };
+                out.balance = num(/"balance":(\d+)/);
+                out.level = num(/"level":(\d+)/);
+                out.pointsPerSearch = num(/"pointsPerSearch":(\d+)/);
+                out.streak = num(/"streakCounter":(\d+)/);
+                out.lifetimeEarn = num(/"lifetimeEarn":(\d+)/);
+                out.lifetimeSpend = num(/"lifetimeSpend":(\d+)/);
+                out.pointClaim = num(/"pointClaim":\s*\{[^}]{0,120}?"points":\s*(\d+)/);
+                const exp = text.match(/"expiresAt":"\$?D?([^"]+)"/);
+                if (exp) out.dailySetExpiresAt = exp[1];
+            } catch (e) {
+                Utils.debug("dashboard", `RSC 解析失败: ${e.message}`);
+            }
+            return out;
+        },
+
+        /**
+         * 读取 dashboard 服务端渲染数据（60 秒缓存）
+         * @param {boolean} force 是否强制刷新
+         * @returns {Promise<Object>} 数据
+         */
+        async getDashboardData(force = false) {
+            const load = async () => {
+                const html = await Utils.xhr({
+                    url: "https://rewards.bing.com/dashboard",
+                    headers: {
+                        "user-agent": RewardsAuto.ua.pc,
+                        "accept": "text/html,application/xhtml+xml"
+                    }
+                });
+                const data = this.parseDashboardHtml(html);
+                Utils.debug("dashboard", `RSC balance=${data.balance} claim=${data.pointClaim} streak=${data.streak} step=${data.pointsPerSearch}`);
+                return data;
+            };
+            if (force) {
+                const data = await load();
+                Utils.cacheSet("dashboardData", data, 60_000);
+                return data;
+            }
+            return Utils.cached("dashboardData", 60_000, load);
+        },
+
+        /**
+         * 解析 reportClaimAllPoints 的 Server Action ID
+         * 说明：该动作位于懒加载 chunk（PointsClaimSidePanel），首屏 chunk 中只有
+         *      「模块 715223 → 面板 chunk」的映射，因此需要两跳：首屏 chunk → 面板 chunk → action id。
+         * @returns {Promise<string>} action id（解析失败返回内置兜底值）
+         */
+        async getClaimActionId() {
+            return Utils.cached("claimActionId", 30 * 60 * 1000, async () => {
+                // action id 实为 42 位十六进制（旧正则写死 40 位会漏匹配），此处用 32~64 兼容
+                const actionRe = /createServerReference\)?\("([0-9a-f]{32,64})"[^)]*"reportClaimAllPoints"/;
+                const grab = async (url) => { try { return String(await Utils.xhr({ url })); } catch (_) { return ""; } };
+                let html = "";
+                try { html = String(await Utils.xhr({ url: "https://rewards.bing.com/dashboard" })); } catch (_) {}
+                const first = [...new Set(html.match(/\/_next\/static\/chunks\/[\w.-]+\.js/g) || [])].slice(0, 40);
+                const seen = new Set(first);
+                const lazy = new Set();
+                // 第一跳：首屏 chunk（同时收集它们引用的懒加载 chunk）
+                for (const src of first) {
+                    const text = await grab(`https://rewards.bing.com${src}`);
+                    const hit = text.match(actionRe);
+                    if (hit) {
+                        Utils.debug("claim", `action id 来自 ${src}`);
+                        return hit[1];
+                    }
+                    for (const ref of text.match(/static\/chunks\/[\w.-]+\.js/g) || []) {
+                        const name = ref.replace(/^.*\//, "");
+                        if (name && name.endsWith(".js")) lazy.add(`/_next/static/chunks/${name}`);
+                    }
+                }
+                // 第二跳：懒加载面板（PointsClaimSidePanel 等）里才有 reportClaimAllPoints
+                for (const src of [...lazy].filter(x => !seen.has(x)).slice(0, 40)) {
+                    const hit = (await grab(`https://rewards.bing.com${src}`)).match(actionRe);
+                    if (hit) {
+                        Utils.debug("claim", `action id 来自懒加载 ${src}`);
+                        return hit[1];
+                    }
+                }
+                Utils.log("🟡", "未动态解析到 reportClaimAllPoints，使用内置 action id");
+                return RewardsAuto.appConfig.claimActionId;
+            });
+        },
+
+        /**
+         * 领取「可领取积分」（调用 reportClaimAllPoints Server Action）
+         * 实测（2026-11-15）：POST /dashboard，头 Next-Action=actionId，body 为 []，
+         *      响应为 RSC 文本，成功时含 "1:true"，之后余额 +3。
+         * @returns {Promise<{ok:boolean,reason:string}>} 结果
+         */
+        async claimAllPoints() {
+            const actionId = await this.getClaimActionId();
+            if (!actionId) return { ok: false, reason: "缺少 action id" };
+            try {
+                const cookie = await Utils.getCookieString("https://rewards.bing.com/dashboard");
+                const res = await Utils.xhr({
+                    method: "POST",
+                    url: "https://rewards.bing.com/dashboard",
+                    headers: {
+                        "accept": "text/x-component",
+                        "content-type": "text/plain;charset=UTF-8",
+                        "next-action": actionId,
+                        "referer": "https://rewards.bing.com/dashboard",
+                        "origin": "https://rewards.bing.com",
+                        "user-agent": RewardsAuto.ua.pc,
+                        ...(cookie ? { "cookie": cookie } : {})
+                    },
+                    data: "[]",
+                    anonymous: false
+                });
+                const text = String(res || "");
+                const ok = /(^|\n)\s*\d+:true\b/.test(text) || /true\s*$/.test(text.trim());
+                Utils.debug("claim", `ServerAction: ${text.slice(0, 200)}`);
+                return { ok, reason: ok ? "已受理" : `服务端返回 ${text.slice(0, 120)}` };
+            } catch (e) {
+                return { ok: false, reason: e.message };
             }
         },
 
@@ -1544,6 +1664,7 @@ Notice:
                 punchcard: { done: 0, total: 0, known: false },
                 evergreen: { done: 0, total: 0, known: false },
                 claimable: 0,
+                appBonus: { done: 0, total: 0, known: false },
                 promoTotal: 0,
                 completedOfferIds: []
             };
@@ -1613,6 +1734,12 @@ Notice:
                         if (p.complete || (p.max > 0 && p.progress >= p.max)) dDone++;
                         continue;
                     }
+                    // 微软 App 专属奖励（Sapphire_AppNewBonus_*）：需在手机 App 内触发，脚本只统计不谎报完成
+                    if (/AppNewBonus/i.test(p.offerId)) {
+                        stats.appBonus.total++;
+                        if (p.complete || (p.max > 0 && p.progress >= p.max)) stats.appBonus.done++;
+                        continue;
+                    }
                     // 任务卡（打卡/任务链）
                     if (/punchcard|quest/i.test(p.offerId)) {
                         pTotal++;
@@ -1633,6 +1760,7 @@ Notice:
                 stats.dailySet = { done: dDone, total: dTotal, known: dTotal > 0 };
                 stats.punchcard = { done: pDone, total: pTotal, known: pTotal > 0 };
                 stats.evergreen = { done: eDone, total: eTotal, known: eTotal > 0 };
+                stats.appBonus.known = stats.appBonus.total > 0;
             }
             // DAPI 不可用时优先用 earn 页余额，避免把“未知”显示成 0
             if (stats.balance === null && info && Number.isFinite(Number(info.balance))) {
@@ -1762,67 +1890,40 @@ Notice:
             });
         },
 
+        /**
+         * 读取搜索/阅读配额与余额
+         * 说明：2026-11 版站点已移除 /api/getuserinfo（返回 401），
+         *      配额改用 dashboard 服务端渲染 + DAPI 511 的搜索任务；保留方法名以兼容旧调用。
+         * @param {boolean} includeRead 是否附带阅读进度
+         * @returns {Promise<Object|false>} 配额（无法确定时返回 false）
+         */
         async getSearchQuotaFromUserInfo(includeRead = true) {
-            try {
-                const res = await Utils.xhr({
-                    url: `https://rewards.bing.com/api/getuserinfo?type=1&X-Requested-With=XMLHttpRequest&_=${Date.now()}`,
-                    headers: {
-                        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.pc,
-                        "referer": "https://rewards.bing.com/",
-                        "x-requested-with": "XMLHttpRequest"
-                    },
-                    anonymous: false
-                });
-                if (!Utils.isJSON(res)) return false;
-                const data = JSON.parse(res);
-                const dashboard = data.dashboard || data;
-                const userStatus = dashboard.userStatus || {};
-                const counters = userStatus.counters || {};
-                const sumCounter = items => {
-                    if (!Array.isArray(items)) return { progress: 0, max: 0 };
-                    return items.reduce((acc, item) => {
-                        acc.progress += Number(item.pointProgress || 0);
-                        acc.max += Number(item.pointProgressMax || item.pointMax || 0);
-                        return acc;
-                    }, { progress: 0, max: 0 });
-                };
-                const pc = sumCounter(counters.pcSearch);
-                let searchStep = 0;
+            const [dash, overview] = await Promise.all([this.getDashboardData(), this.getDAPIOverview()]);
+            const promo = overview ? overview.promotions.find(p => p.type === "search" && p.max > 0) : null;
+            if (!promo) return false;
+            const pc = { progress: promo.progress, max: promo.max, step: Number(dash?.pointsPerSearch) || 0 };
+            let readProgress = 0, readMax = 30;
+            if (includeRead) {
                 try {
-                    const desc = String(counters.pcSearch?.[0]?.attributes?.description || "");
-                    const stepMatch = desc.match(/每次搜索可获得\s*(\d+)\s*积分/);
-                    if (stepMatch) searchStep = parseInt(stepMatch[1], 10) || 0;
+                    const readInfo = await API.getReadProgress();
+                    if (readInfo) { readProgress = readInfo.progress; readMax = readInfo.max; }
                 } catch (_) {}
-                pc.step = searchStep;
-                if (pc.max === 0) return false;
-                const balance = Number(userStatus.availablePoints || dashboard.availablePoints || 0);
-                let readProgress = 0, readMax = 30;
-                if (includeRead) {
-                    try {
-                        const readInfo = await API.getReadProgress();
-                        if (readInfo) { readProgress = readInfo.progress; readMax = readInfo.max; }
-                    } catch (e) {}
-                }
-                Utils.log("📊", `getuserinfo查询: PC ${pc.progress}/${pc.max}, 阅读 ${readProgress}/${readMax}, 积分 ${balance}`);
-                return {
-                    balance, pc, readProgress, readMax, dailyOffer: 0,
-                    todayDetails: pc.max > 0 ? [{ title: "必应搜索", points: pc.progress, max: pc.max }] : [],
-                    history: null
-                };
-            } catch (e) {
-                if (GM_getValue("Config.debugDAPI", false)) {
-                    Utils.log("🟡", `getuserinfo 查询失败: ${e.message}`);
-                }
-                return false;
             }
+            const balance = overview?.balance ?? dash?.balance ?? 0;
+            Utils.log("📊", `配额查询: PC ${pc.progress}/${pc.max}, 阅读 ${readProgress}/${readMax}, 积分 ${balance}`);
+            return {
+                balance, pc, readProgress, readMax, dailyOffer: 0,
+                todayDetails: [{ title: "必应搜索", points: pc.progress, max: pc.max }],
+                history: null
+            };
         },
 
         async getSearchStep() {
             return Utils.cached("searchStep", 10 * 60 * 1000, async () => {
                 try {
-                    const info = await this.getSearchQuotaFromUserInfo(false);
-                    const step = Number(info?.pc?.step) || 0;
+                    // 新版站点在 dashboard RSC 里直接给出每次搜索积分（当前 3）
+                    const dash = await this.getDashboardData();
+                    const step = Number(dash?.pointsPerSearch) || 0;
                     return step > 0 ? step : 3;
                 } catch (_) {
                     return 3;
@@ -1830,47 +1931,26 @@ Notice:
             });
         },
 
+        /**
+         * 用 DAPI（options=511）读取搜索配额，作为页面解析失败时的兜底
+         * 说明：旧实现用 options=613 并依赖 counters.pcSearch 数组，2026-11 起这两者都不存在；
+         *      511 的 promotions 里仍有搜索任务（WW_search_* / max=60），用它的进度即可。
+         * @returns {Promise<Object|false>} 配额
+         */
         async getSearchQuotaFromAPI() {
             try {
-                const res = await this.withTokenRetry(token => Utils.xhr({
-                    url: "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=613",
-                    headers: {
-                        "content-type": "application/json; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": "cn",
-                        "x-rewards-language": "zh"
-                    }
-                }));
-                if (Utils.isJSON(res)) {
-                    const data = JSON.parse(res);
-                    const response = data.response || {};
-                    const promos = response.promotions || [];
-                    const counters = response.counters || response.userStatus?.counters;
-                    if (!counters) return false;
-                    let pcCur = 0, pcMax = 0, pcStep = 0;
-                    if (counters?.pcSearch && counters.pcSearch.length > 0) {
-                        const item = counters.pcSearch[0];
-                        pcCur = item.pointProgress || 0;
-                        pcMax = item.pointProgressMax || 0;
-                        try {
-                            const desc = String(item.attributes?.description || "");
-                            const stepMatch = desc.match(/每次搜索可获得\s*(\d+)\s*积分/);
-                            if (stepMatch) pcStep = parseInt(stepMatch[1], 10) || 0;
-                        } catch (_) {}
-                    }
-                    if (pcMax === 0) return false;
-                    const balance = response.balance || response.userStatus?.availablePoints || 0;
-                    let readProgress = 0, readMax = 30;
-                    try {
-                        const readInfo = await API.getReadProgress();
-                        if (readInfo) { readProgress = readInfo.progress; readMax = readInfo.max; }
-                    } catch (e) {}
-                    Utils.log("📊", `DAPI查询: PC ${pcCur}/${pcMax}, 阅读 ${readProgress}/${readMax}, 积分 ${balance}`);
-                    return { balance, pc: { progress: pcCur, max: pcMax, step: pcStep }, readProgress, readMax, dailyOffer: 0, todayDetails: [], history: null };
-                }
+                const overview = await this.getDAPIOverview();
+                if (!overview) return false;
+                const promo = overview.promotions.find(p => p.type === "search" && p.max > 0);
+                if (!promo) return false;
+                let readProgress = 0, readMax = 30;
+                try {
+                    const readInfo = await API.getReadProgress();
+                    if (readInfo) { readProgress = readInfo.progress; readMax = readInfo.max; }
+                } catch (_) {}
+                const pc = { progress: promo.progress, max: promo.max, step: await this.getSearchStep() };
+                Utils.log("📊", `DAPI查询: PC ${pc.progress}/${pc.max}, 阅读 ${readProgress}/${readMax}, 积分 ${overview.balance}`);
+                return { balance: overview.balance, pc, readProgress, readMax, dailyOffer: 0, todayDetails: [], history: null };
             } catch (e) {
                 Utils.log("🟡", `DAPI查询失败: ${e.message}`);
             }
@@ -1898,20 +1978,11 @@ Notice:
                 }
             } catch (e) {}
             try {
-                const res2 = await Utils.xhr({
-                    url: `https://rewards.bing.com/api/getuserinfo?type=1&X-Requested-With=XMLHttpRequest&_=${Date.now()}`,
-                    headers: {
-                        "user-agent": RewardsAuto.ua.pc,
-                        "referer": "https://rewards.bing.com/",
-                        "x-requested-with": "XMLHttpRequest"
-                    },
-                });
-                if (Utils.isJSON(res2)) {
-                    const data2 = JSON.parse(res2);
-                    const value = Number(data2.dashboard?.availablePoints ?? data2.balance);
-                    return Number.isFinite(value) ? value : null;
-                }
-            } catch (e) {}
+                // 兜底：dashboard 服务端渲染的 balance（旧 getuserinfo 已返回 401）
+                const dash = await this.getDashboardData(true);
+                const value = Number(dash?.balance);
+                if (Number.isFinite(value)) return value;
+            } catch (_) {}
             return null;
         },
 
@@ -2010,52 +2081,32 @@ Notice:
                     return { title, points, offerId, hash, kind: inferKind(offerId, title), destination: destMatch ? destMatch[1] : "" };
                 };
 
+                // 兜底：旧 getuserinfo 已 401 下线，改用 DAPI（options=511）的 promotions 生成卡片
                 try {
-                    const userInfo = await Utils.xhr({
-                        url: `https://rewards.bing.com/api/getuserinfo?type=1&X-Requested-With=XMLHttpRequest&_=${Date.now()}`,
-                        headers: { "user-agent": RewardsAuto.ua.pc, "referer": "https://rewards.bing.com/", "x-requested-with": "XMLHttpRequest" },
-                        anonymous: false
-                    });
-                    if (Utils.isJSON(userInfo)) {
-                        const data = JSON.parse(userInfo);
-                        const dashboard = data.dashboard || data;
-                        const now = new Date();
-                        const todayKeys = new Set([
-                            `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")}/${now.getFullYear()}`,
-                            `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}`
-                        ]);
-                        const normalizeDashboardCard = (item, kind) => {
-                            if (!item) return null;
-                            const offerId = item.offerId || item.offerid || item.id || item.name;
-                            const hash = item.hash || item.activityId;
-                            const title = item.title || item.name || item.description || "";
-                            const points = Number(item.points ?? item.pointProgressMax ?? item.max ?? 0);
-                            const doneMax = Number(item.pointProgressMax || 0);
-                            const doneCur = Number(item.pointProgress || 0);
-                            const isCompleted = item.isCompleted || item.complete || (doneMax > 0 && doneCur >= doneMax);
-                            if (!offerId || !hash || points <= 0 || isCompleted) return null;
-                            const skip = RewardsAuto.skipPatterns.some(p => title.toLowerCase().includes(p.toLowerCase()) || offerId.toLowerCase().includes(p.toLowerCase()));
-                            if (skip) return null;
-                            // 保留目标链接（访问型卡片需靠它完成上报）
-                            const destination = item.destinationUrl || item.destination || "";
-                            return { title, points, offerId, hash, kind: kind || inferKind(offerId, title), source: "getuserinfo", destination, url: destination || "https://rewards.bing.com/" };
-                        };
-
-                        const dailySetPromotions = dashboard.dailySetPromotions || {};
-                        for (const dateKey of todayKeys) {
-                            const dailyItems = dailySetPromotions[dateKey];
-                            if (Array.isArray(dailyItems)) {
-                                for (const item of dailyItems) pushCard(normalizeDashboardCard(item, "daily"));
-                            }
-                        }
-                        const morePromotions = dashboard.morePromotions || dashboard.promotions || [];
-                        if (Array.isArray(morePromotions)) {
-                            for (const item of morePromotions) pushCard(normalizeDashboardCard(item));
-                        }
+                    const overview = await API.getDAPIOverview();
+                    const skipTypes = new Set(["search", "msnreadearn", "checkin", "dailyset", "streak"]);
+                    for (const item of (overview ? overview.promotions : [])) {
+                        if (!item.offerId || item.hidden || item.complete) continue;
+                        if (item.max > 0 && item.progress >= item.max) continue;
+                        if (skipTypes.has(item.type)) continue;
+                        const skip = RewardsAuto.skipPatterns.some(p =>
+                            String(item.title).toLowerCase().includes(p.toLowerCase()) ||
+                            item.offerId.toLowerCase().includes(p.toLowerCase()));
+                        if (skip) continue;
+                        // DAPI 任务没有 hash，占位为 "1"：领取走 DAPI type=101 通道，不使用 hash
+                        pushCard({
+                            title: item.title || item.offerId,
+                            points: item.points,
+                            offerId: item.offerId,
+                            hash: "1",
+                            kind: inferKind(item.offerId, item.title),
+                            source: "dapi",
+                            destination: item.destination || "",
+                            url: item.destination || "https://rewards.bing.com/"
+                        });
                     }
                 } catch (e) {
-                    // getuserinfo 已属旧版接口（社区标注 legacy），后台无会话 Cookie 时常返回 401，仅记录调试
-                    Utils.debug("getuserinfo", `活动解析跳过: ${e.message}`);
+                    Utils.debug("dapi", `活动兜底解析跳过: ${e.message}`);
                 }
 
                 // --- [Next.js Flight Chunks & DAPI parsing] ---
@@ -2381,32 +2432,7 @@ Notice:
                 } catch (_) {}
             }
 
-            // 策略 3: 老版 reportactivity
-            try {
-                const startedAt = Date.now();
-                const token = await this.getRewardsToken();
-                if (token) {
-                    await Utils.xhr({
-                        method: "POST",
-                        url: "https://rewards.bing.com/api/reportactivity?X-Requested-With=XMLHttpRequest",
-                        headers: {
-                            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                            "user-agent": RewardsAuto.ua.pc,
-                            "referer": referer,
-                            "origin": "https://rewards.bing.com",
-                            "x-requested-with": "XMLHttpRequest",
-                            "RequestVerificationToken": token
-                        },
-                        data: new URLSearchParams({
-                            id: card.offerId, hash: card.hash, timeZone: new Date().getTimezoneOffset(),
-                            activityAmount: 1, dbs: 0, form: "", type: "",
-                            __RequestVerificationToken: token
-                        }).toString()
-                    });
-                    return await this.settleCard(card, "老版 reportactivity", startedAt);
-                }
-            } catch (_) {}
-
+            // 策略 3（老版 /api/reportactivity）已于 2026-11 站点下线（返回 404），此处已移除，避免假成功
             Utils.log("🟡", `卡片领取未确认(${card.offerId})`);
             return false;
         },
@@ -2422,18 +2448,10 @@ Notice:
                 return this._dashboardCache.data;
             }
             try {
-                const text = await Utils.xhr({
-                    url: `https://rewards.bing.com/api/getuserinfo?type=1&X-Requested-With=XMLHttpRequest&_=${now}`,
-                    headers: {
-                        "user-agent": RewardsAuto.ua.pc,
-                        "referer": "https://rewards.bing.com/",
-                        "x-requested-with": "XMLHttpRequest"
-                    },
-                    anonymous: false
-                });
-                if (!Utils.isJSON(text)) return null;
-                const parsed = JSON.parse(text);
-                const data = parsed?.dashboard || parsed;
+                // 旧 /api/getuserinfo 已失效（401），改用 DAPI（options=511）的 promotions 作为完成状态来源
+                const overview = await this.getDAPIOverview();
+                if (!overview) return null;
+                const data = { promotions: overview.promotions, balance: overview.balance };
                 this._dashboardCache = { at: now, data };
                 return data;
             } catch (e) {
@@ -2450,24 +2468,21 @@ Notice:
          */
         async verifyCardCompleted(offerId, notBefore = 0) {
             if (!offerId) return null;
-            // 不再为每张卡片强制刷新 dashboard：5 分钟缓存足够，避免 N 次 getuserinfo
+            // 不再为每张卡片强制刷新 dashboard：5 分钟缓存足够，避免 N 次请求
             const dashboard = await this.fetchDashboardCached(false);
             if (!dashboard) return null;
 
-            const buckets = [];
-            const daily = dashboard.dailySetPromotions || {};
-            for (const key of Object.keys(daily)) {
-                if (Array.isArray(daily[key])) buckets.push(...daily[key]);
-            }
-            const more = dashboard.morePromotions || dashboard.promotions || [];
-            if (Array.isArray(more)) buckets.push(...more);
-
-            const hit = buckets.find(x => x && (x.offerId === offerId || x.offerid === offerId));
+            const promotions = Array.isArray(dashboard.promotions) ? dashboard.promotions : [];
+            // offerId 可能带 _Default 后缀，做双向归一化匹配
+            const base = String(offerId).replace(/_Default$/i, "");
+            const hit = promotions.find(x => x && (
+                x.offerId === offerId ||
+                x.offerId === base ||
+                String(x.offerId || "").replace(/_Default$/i, "") === base
+            ));
             if (!hit) return null;
-            if (hit.complete === true || hit.isCompleted === true) return true;
-            const max = Number(hit.pointProgressMax || 0);
-            const cur = Number(hit.pointProgress || 0);
-            if (max > 0 && cur >= max) return true;
+            if (hit.complete === true) return true;
+            if (hit.max > 0 && hit.progress >= hit.max) return true;
             return false;
         },
 
@@ -2882,7 +2897,8 @@ Notice:
             this.streakDays = tasks.streakDays || 0;
             // 版本升级时清掉旧版本可能误写的“今日已完成”标记，
             // 否则新版本当天会直接跳过活动/日常任务（v1.3.1/v1.3.2 都有这类残留）。
-            const engineVersion = "1.3.4";
+            // v1.6.0 更换了数据源（dashboard RSC + DAPI 字段适配），升级时重置一次当日尝试状态
+            const engineVersion = "1.6.0";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -3416,25 +3432,25 @@ Notice:
                     Utils.debug("claim", `余额读取失败(before=${before})，跳过领取`);
                     return;
                 }
-                // 待领取来源 1：DAPI 推广（progress>=max 且未 complete）
+                // 待领取来源 1：dashboard 服务端渲染的 pointClaim（2026-11 版站点唯一可靠来源）
                 let amount = 0;
                 let source = "";
-                let dashboardHtml = "";
                 try {
-                    const stats = await API.getServerStats();
-                    if (stats && stats.claimable > 0) {
-                        amount = stats.claimable;
-                        source = "DAPI";
+                    const dash = await API.getDashboardData(true);
+                    if (dash && dash.pointClaim && dash.pointClaim.points > 0) {
+                        amount = dash.pointClaim.points;
+                        source = "dashboard";
                     }
                 } catch (_) {}
-                // 待领取来源 2：dashboard 文案兜底
+                // 待领取来源 2：DAPI 推广（progress>=max 且未 complete）
                 if (amount <= 0) {
-                    dashboardHtml = await Utils.xhr({ url: "https://rewards.bing.com/dashboard" }) || "";
-                    const claimableMatch = dashboardHtml.match(/alt="可领取"[^>]*>[\s\S]*?(\d[\d,]*)/)
-                        || dashboardHtml.match(/(?:可领取|待领取|to claim)[^0-9]{0,80}(\d[\d,]*)/i)
-                        || dashboardHtml.match(/(\d[\d,]*)[^0-9]{0,60}(?:可领取|待领取|to claim)/i);
-                    amount = claimableMatch ? (parseInt(claimableMatch[1].replace(/,/g, '')) || 0) : 0;
-                    if (amount > 0) source = "dashboard";
+                    try {
+                        const stats = await API.getServerStats();
+                        if (stats && stats.claimable > 0) {
+                            amount = stats.claimable;
+                            source = "DAPI";
+                        }
+                    } catch (_) {}
                 }
                 if (amount <= 0) {
                     Utils.log("✅", "无可领取积分");
@@ -3442,36 +3458,14 @@ Notice:
                 }
                 Utils.log("🎁", `发现 ${amount} 积分待领取（${source}），尝试领取...`);
 
-                // 策略 1: reportClaimAllPoints Server Action
+                // 策略 1: reportClaimAllPoints Server Action（无参数，body "[]"，action id 运行时动态解析）
                 let acked = false;
                 let responseSample = "";
                 try {
-                    const pageHtml = dashboardHtml || await Utils.xhr({ url: "https://rewards.bing.com/dashboard" }) || "";
-                    const actions = await API.resolveServerActions(pageHtml);
-                    const claimAction = actions.reportClaimAllPoints;
-                    if (claimAction) {
-                        const deployMatch = pageHtml.match(/[?&](?:amp;)?dpl=([A-Za-z0-9._-]+)/) || pageHtml.match(/"buildId":"([A-Za-z0-9._-]+)"/);
-                        const tree = ["", { children: ["(nav)", { children: ["dashboard", { children: ["PAGE", {}, null, null, 4096] }, null, null, 4096] }, null, null, 4096] }, null, null, 4096 + 16];
-                        const res = await Utils.xhr({
-                            method: "POST",
-                            url: "https://rewards.bing.com/dashboard",
-                            headers: {
-                                "accept": "text/x-component",
-                                "content-type": "text/plain;charset=UTF-8",
-                                "next-action": claimAction,
-                                "next-router-state-tree": encodeURIComponent(JSON.stringify(tree)),
-                                "referer": "https://rewards.bing.com/dashboard",
-                                "origin": "https://rewards.bing.com",
-                                ...(deployMatch ? { "x-deployment-id": deployMatch[1] } : {})
-                            },
-                            data: "[]"
-                        });
-                        responseSample = String(res || "").slice(0, 600);
-                        // 仅代表服务端已处理请求，是否到账仍需余额校验
-                        acked = /^\d+:true\s*$/m.test(String(res || ""));
-                    } else {
-                        Utils.debug("claim", "未在页面 chunk 中发现 reportClaimAllPoints");
-                    }
+                    const result = await API.claimAllPoints();
+                    acked = Boolean(result && result.ok);
+                    responseSample = result ? String(result.reason || "") : "";
+                    if (acked) Utils.log("🟢", "reportClaimAllPoints 已受理");
                 } catch (e) {
                     Utils.debug("claim", `reportClaimAllPoints 请求异常: ${e.message}`);
                 }
@@ -3509,12 +3503,23 @@ Notice:
             Utils.log("📅", "开始检测连签任务...");
             try {
                 const earnHtml = await API.getEarnHtml();
-                if (!earnHtml) { Utils.log("🟡", "无法获取 earn 页面"); return; }
-                const text = earnHtml.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
-                const streakDaysMatch = text.match(/每日连续打卡\s*(\d+)/);
-                if (streakDaysMatch) {
-                    this.streakDays = parseInt(streakDaysMatch[1]) || 0;
-                    Utils.log("📅", `每日连续打卡：${this.streakDays} 天`);
+                const text = (earnHtml || "").replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+                // 新版站点优先用 dashboard RSC 的 streakCounter（earn 页已不再输出「每日连续打卡 N」文案）
+                let streakFound = false;
+                try {
+                    const dash = await API.getDashboardData();
+                    if (dash && Number(dash.streak) > 0) {
+                        this.streakDays = Number(dash.streak);
+                        streakFound = true;
+                        Utils.log("📅", `每日连续打卡：${this.streakDays} 天`);
+                    }
+                } catch (_) {}
+                if (!streakFound) {
+                    const streakDaysMatch = text.match(/每日连续打卡\s*(\d+)/);
+                    if (streakDaysMatch) {
+                        this.streakDays = parseInt(streakDaysMatch[1]) || 0;
+                        Utils.log("📅", `每日连续打卡：${this.streakDays} 天`);
+                    }
                 }
                 const taskPatterns = [
                     { name: "必应搜索连续打卡", pattern: /必应搜索连续打卡[\s\S]*?搜索:\s*(\d+)\/(\d+)/ },
@@ -4293,23 +4298,7 @@ Notice:
             } catch (e) {
                 report.endpoints.dashboardPage = { error: e.message };
             }
-            // 探测网页上报接口与搜索页是否可用（无效 offerId，不会产生真实积分）
-            // 无 Token 时上报必然 401，直接跳过，避免把鉴权失败误报成接口故障
-            if (!RewardsAuto.state.token) {
-                report.endpoints.reportActivityProbe = { skipped: "no token" };
-            } else {
-                try {
-                    const vt = await API.getRequestVerificationToken("https://rewards.bing.com/");
-                    const probeRes = await API.reportActivity("__probe__", "1", "https://rewards.bing.com/");
-                    report.endpoints.reportActivityProbe = {
-                        tokenPresent: Boolean(vt),
-                        tokenLength: vt.length,
-                        response: String(probeRes).slice(0, 500)
-                    };
-                } catch (e) {
-                    report.endpoints.reportActivityProbe = { error: e.message };
-                }
-            }
+            // 旧版 /api/reportactivity 已于 2026-11 下线（实测 POST 401），不再探测
             try {
                 const searchHtml = String(await API.getSearchPage("rewards probe", false) || "");
                 report.endpoints.searchProbe = {
