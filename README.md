@@ -36,6 +36,7 @@
 
 ## ⬇️ 下载
 
+- **ScriptCat 商店（推荐）**：[scriptcat.org](https://scriptcat.org/zh-CN/script-show-page/9092) · 一键安装 <https://scriptcat.org/scripts/code/9092/%E5%BE%AE%E8%BD%AF%E7%A7%AF%E5%88%86%EF%BC%88%E6%8C%81%E7%BB%AD%E4%BF%AE%E5%A4%8D%E7%89%88%C2%B7%E4%BC%98%E5%8C%96%EF%BC%89.user.js>
 - **最新版直链**：[microsoft-rewards-scriptcat.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js)
 - 历史版本：[Releases 页面](https://github.com/vfuncyy/scriptcat-ms-rewards/releases)
 
@@ -44,7 +45,7 @@
 ## 📦 安装使用
 
 1. 浏览器安装 [脚本猫 ScriptCat](https://scriptcat.org/) 扩展（Chrome / Edge / Firefox）；
-2. 将 `微软积分（持续修复版·优化）.user.js` 导入脚本猫（拖入扩展或新建脚本粘贴全文）；
+2. 安装脚本：在 [ScriptCat 商店](https://scriptcat.org/zh-CN/script-show-page/9092) 点「安装」，或把 `微软积分（持续修复版·优化）.user.js` 导入脚本猫（拖入扩展或新建脚本粘贴全文）；
 3. 首次使用：脚本菜单 →「🔑 手动授权」→ 登录微软账户完成 OAuth 授权；
 4. 之后由 crontab（`*/20 * * * *`）自动运行，无需人工干预；
 5. 自动更新：脚本已内置 `@updateURL`/`@downloadURL`，在脚本猫中开启「检查更新」后，新发布的 Release 会自动拉取升级（随附的 `script.options.json` 已默认开启）。
