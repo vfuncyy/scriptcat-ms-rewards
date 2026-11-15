@@ -37,7 +37,7 @@
 
 ## ⬇️ 下载
 
-- **ScriptCat 商店（推荐）**：[scriptcat.org](https://scriptcat.org/zh-CN/script-show-page/9092) · 一键安装 <https://scriptcat.org/scripts/code/9092/%E5%BE%AE%E8%BD%AF%E7%A7%AF%E5%88%86%EF%BC%88%E6%8C%81%E7%BB%AD%E4%BF%AE%E5%A4%8D%E7%89%88%C2%B7%E4%BC%98%E5%8C%96%EF%BC%89.user.js>
+- **ScriptCat 商店（推荐）**：[scriptcat.org](https://scriptcat.org/zh-CN/script-show-page/9092) · 一键安装 <https://scriptcat.org/scripts/code/9092/%E5%BE%AE%E8%BD%AFbing%20rewards%E7%A7%AF%E5%88%86%E8%8E%B7%E5%8F%96%EF%BC%88%E6%8C%81%E7%BB%AD%E4%BC%98%E5%8C%96%E7%89%88%EF%BC%89.user.js>
 - **最新版直链**：[microsoft-rewards-scriptcat.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js)
 - 历史版本：[Releases 页面](https://github.com/vfuncyy/scriptcat-ms-rewards/releases)
 
