@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.7.0
-// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；连续 3 次确认全部完成后次日再运行；全程后台运行，不打开多余标签页
+// @version      1.8.0
+// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
 // @crontab      */20 * * * *
@@ -43,6 +43,17 @@
 // @tag          自动任务
 // @tag          PushPlus
 // ==/UserScript==
+
+/*
+ * 开源致谢 / Acknowledgments
+ * 本脚本是在下列开源作品的基础上持续修复与重构而来，感谢原作者与维护者：
+ *   1. yehai《微软积分（持续修复版）》        https://gitee.com/yehai/bing-rewards        （本脚本的直接上游）
+ *   2. hidmould《微软积分（优化版）》          https://github.com/hidmould/MicrosoftPoints  （CDP 真搜索、Quiz/拼图判定、通知分层的实测结论来源）
+ *   3. Muverix《Get Microsoft Rewards (修复/增强版)》 https://github.com/Muverix/Get-Microsoft-Rewards （等级门槛/待领取判定的思路来源）
+ *   4. QingJ《Get Microsoft Rewards》          https://github.com/QingJ01                   （上述同类脚本的共同起点，本脚本的谱系源头）
+ * 感谢 ScriptCat（脚本猫）提供的运行环境与分发平台：https://scriptcat.org
+ * 本项目同样以 MIT 协议开源，详见仓库 README。
+ */
 
 /* global GM_cookie, GM_getValue, GM_setValue, GM_xmlhttpRequest, GM_log, GM_info, GM_notification, GM_openInTab */
 
@@ -92,6 +103,11 @@ Tasks:
         title: PC搜索
         type: checkbox
         default: true
+    desktop:
+        title: 桌面应用周任务（Rewards App 周卡）
+        type: checkbox
+        default: true
+        description: 用桌面客户端身份领取「WW_pcparent_RewardsApp_weekly」周任务子项，失败不影响其他任务
 Notice:
     bro:
         title: 浏览器通知（当前脚本）
@@ -266,7 +282,12 @@ Notice:
         /** 本轮已确认完成的 offerId，避免重复上报同一卡片 */
         claimedOfferIds: new Set(),
         /** 上报已受理但 dashboard 尚未确认的卡片，避免提前标记当天完成 */
-        unconfirmedOfferIds: new Set()
+        unconfirmedOfferIds: new Set(),
+        /**
+         * 本轮判定为「脚本做不了、需要人工」的卡片：offerId → { title, reason }
+         * v1.8.0 新增，日报里汇总条数，避免把这类卡当成“失败”反复重试
+         */
+        humanNeeded: new Map()
     };
 
     /**
@@ -539,16 +560,45 @@ Notice:
         },
 
         /**
-         * 推送异常信息：同一类错误每天最多推送一次，其余仅写入日志
+         * 推送异常信息（v1.8.0 分层节流）
+         * 规则：①同一 key 6 小时内只推一次；②全局每小时最多 3 条；
+         *      ③被节流时只写 GM_log，不打扰手机。完成/日报类通知不走这里，不受影响。
          * @param {string} key 错误类型标识（用于去重）
          * @param {string} msg 错误内容
          */
         notifyError(key, msg) {
+            const now = Date.now();
             const state = this.getNotifyState();
+            const throttle = GM_getValue("Config.notifyThrottle", null) || {};
+            const keys = (throttle.keys && typeof throttle.keys === "object") ? throttle.keys : {};
+            const hours = (throttle.hours && typeof throttle.hours === "object") ? throttle.hours : {};
+            // 同一类异常 6 小时内只提醒一次（比「按日去重」更贴近真实扰民感受）
+            const lastAt = Number(keys[key] || 0);
+            if (lastAt && now - lastAt < 6 * 60 * 60 * 1000) {
+                GM_log(`🔴 [同类异常 6 小时内已提醒过，静默] ${msg}`);
+                return;
+            }
             if (state.errors.includes(key)) {
                 GM_log(`🔴 [今日已推送过该异常，静默] ${msg}`);
                 return;
             }
+            const bucket = String(Math.floor(now / 3600000));
+            // 清理一天前的旧桶与旧 key，避免 GM 存储无限增长
+            for (const k of Object.keys(hours)) {
+                if (Number(k) < Number(bucket) - 24) delete hours[k];
+            }
+            for (const k of Object.keys(keys)) {
+                if (now - Number(keys[k] || 0) > 24 * 60 * 60 * 1000) delete keys[k];
+            }
+            if (Number(hours[bucket] || 0) >= 3) {
+                keys[key] = now;
+                GM_setValue("Config.notifyThrottle", { keys, hours });
+                GM_log(`🔴 [本小时推送已达 3 条上限，静默] ${msg}`);
+                return;
+            }
+            hours[bucket] = Number(hours[bucket] || 0) + 1;
+            keys[key] = now;
+            GM_setValue("Config.notifyThrottle", { keys, hours });
             state.errors.push(key);
             this.saveNotifyState(state);
             this.log("🔴", `【异常】${msg}`, true);
@@ -2322,12 +2372,47 @@ Notice:
         },
 
         /**
-         * 领取/完成单个任务卡片（多策略：DAPI → Server Action → 老版 reportactivity）
-         * @param {Object} card 任务卡片 {offerId, hash, title, kind, destination, url}
-         * @returns {Promise<boolean>} 是否确认完成
+         * 判断一张卡是不是「接口做不到、只能人工」的类型（v1.8.0）
+         * 结论来自两处实测：①社区脚本 ref-8787 的注释——只调面板接口对 Quiz 卡无效，
+         * 必须真在落地页点掉答案，页面才会带 WQOskey/WQId/WQQI 去上报；
+         * ②+10 带锁拼图（VerB_Locked_level2）同样必须真人拼完。
+         * @param {Object} card 卡片对象（来自 earn 页或 DAPI）
+         * @returns {string} 跳过原因；空字符串表示可以尝试自动完成
+         */
+        _cardBlockReason(card) {
+            const text = `${card.offerId || ""} ${card.title || ""} ${card.destination || ""}`;
+            if (card.kind === "quiz" || /quiz|BingQA_Quiz|Homepage%20quiz|form=ML2BF1/i.test(text)) {
+                return "需真实作答：Quiz 卡要在落地页点答案后页面才会带凭据上报";
+            }
+            if (/VerB_Locked_level/i.test(text)) {
+                return "需真拼：+10 带锁拼图只能人工完成";
+            }
+            if (/form=ML2W4J|form=ML2Y2H/i.test(text)) {
+                return "需 App 内搜索：该卡只认 Rewards 手机客户端内的搜索";
+            }
+            if (/locked_level|_level2|_level3/i.test(text)) {
+                return "等级不足：当前账号等级未达该卡要求";
+            }
+            return "";
+        },
+
+        /**
+         * 领取单张卡片
+         * @param {Object} card 卡片对象
+         * @returns {Promise<boolean>} 是否确认到账
          */
         async claimCard(card) {
             if (!card?.offerId) return false;
+            // v1.8.0：先判定这张卡是否属于「脚本做不到、必须人工」的类型，
+            // 命中的卡不再浪费一次上报（旧逻辑会当成失败反复重试，还会污染失败计数）
+            const blockReason = this._cardBlockReason(card);
+            if (blockReason) {
+                if (!RewardsAuto.humanNeeded.has(card.offerId)) {
+                    RewardsAuto.humanNeeded.set(card.offerId, { title: card.title || card.offerId, reason: blockReason });
+                    Utils.log("🟡", `「${card.title || card.offerId}」跳过：${blockReason}`);
+                }
+                return false;
+            }
             if (RewardsAuto.claimedOfferIds.has(card.offerId)) return true;
             const ok = await this._claimCard(card);
             if (ok) RewardsAuto.claimedOfferIds.add(card.offerId);
@@ -2746,11 +2831,12 @@ Notice:
         signDate: 0, readDate: 0, promosDate: 0, searchDate: 0, dailySetDate: 0, streakDays: 0,
         signPoint: -1, signTimes: 0, readTimes: 0, promosTimes: 0,
         signAppPoint: -1, signPCPoint: -1, promoStats: { ok: 0, fail: 0 }, dailySetStats: { ok: 0, fail: 0 },
+        // 桌面应用周任务：本轮进度与到账统计（v1.8.0 新增）
+        desktopDate: 0, desktopTotal: 0, desktopDone: 0, desktopStats: { ok: 0, fail: 0 },
         // 运行锁：内存态在 service worker 被回收后不可靠，故持久化到 GM 存储防止新旧两轮并发
         runId: null,
         sleepMs: 0,
         running: false,
-        _completionEvaluated: false,
         /**
          * 运行锁心跳超时阈值：超过该时长未刷新，视为旧轮已被浏览器回收或卡死
          * @type {number}
@@ -2814,72 +2900,8 @@ Notice:
             this.runId = null;
         },
 
-        /**
-         * 读取“连续完成”调度状态；跨日时自动清空
-         * @returns {{date:number,streak:number,nextRunAt:number}} 当日调度状态
-         */
-        readCompletionSchedule() {
-            const today = Utils.getTodayNum();
-            const saved = GM_getValue("Config.completionSchedule", null);
-            if (!saved || typeof saved !== "object") {
-                return { date: today, streak: 0, nextRunAt: 0 };
-            }
-            if (Number(saved.date) !== today) {
-                GM_setValue("Config.completionSchedule", null);
-                return { date: today, streak: 0, nextRunAt: 0 };
-            }
-            return {
-                date: today,
-                streak: Math.max(0, Number(saved.streak) || 0),
-                nextRunAt: Math.max(0, Number(saved.nextRunAt) || 0)
-            };
-        },
-
-        /**
-         * 是否已锁定到次日
-         * 说明：ScriptCat 的 @crontab 是静态元数据，脚本无法在运行时改写；
-         *      这里让定时唤醒只做一次本地判断就退出，不再发起任何网络请求。
-         * @returns {boolean} true 表示本轮不需要执行任务
-         */
-        isWaitingForNextDay() {
-            return this.readCompletionSchedule().nextRunAt > Date.now();
-        },
-
-        /**
-         * 记录一次全量检测结果：连续 3 次确认全部完成后锁定到次日 00:05
-         * @param {boolean} done 本轮是否确认所有已启用任务完成
-         */
-        recordCompletion(done) {
-            const today = Utils.getTodayNum();
-            const runDay = RewardsAuto.state.dateNowNum || today;
-            // 跨午夜结束的轮次属于前一天，不能把新一天也锁掉
-            if (runDay !== today) {
-                GM_setValue("Config.completionSchedule", { date: today, streak: 0, nextRunAt: 0 });
-                return;
-            }
-            const schedule = this.readCompletionSchedule();
-            let streak = schedule.streak;
-            let nextRunAt = schedule.nextRunAt;
-            if (done) {
-                streak += 1;
-                if (streak >= 3 && !nextRunAt) {
-                    const next = new Date();
-                    next.setDate(next.getDate() + 1);
-                    next.setHours(0, 5, 0, 0);
-                    nextRunAt = next.getTime();
-                    GM_log(`✅ 连续 ${streak} 次确认今日任务完成，下次任务窗口 ${next.toLocaleString()}`);
-                }
-            } else {
-                if (streak > 0 || nextRunAt) GM_log("🟡 本轮未确认全部完成，连续完成计数已重置");
-                streak = 0;
-                nextRunAt = 0;
-            }
-            GM_setValue("Config.completionSchedule", {
-                date: today,
-                streak,
-                nextRunAt
-            });
-        },
+        // v1.8.0：已彻底移除「连续 N 天全部完成后次日跳过」的跨日调度逻辑；脚本每天固定运行，
+        // 只要当天有未完成项就继续补做，唯一的“跳过”是同轮并发保护（运行锁）。
 
         init() {
             RewardsAuto.state.dateNowNum = Utils.getTodayNum();
@@ -3116,6 +3138,173 @@ Notice:
             }
         },
 
+        /**
+         * 桌面应用周任务（Rewards App 每周专属 punchcard）
+         * 说明：这类卡只有「桌面客户端」身份交卷才会记账，普通浏览器身份一律不计分，
+         *      因此整段都用 MSRewards 桌面 UA + X-MSRewards-App 头访问 /earn 与 quest 页。
+         * @returns {Promise<void>}
+         */
+        async doDesktopWeeklyQuests() {
+            if (!GM_getValue("Tasks.desktop", true)) return;
+            const today = RewardsAuto.state.dateNowNum;
+            if (this.desktopDate === today && this.desktopTotal > 0 && this.desktopDone >= this.desktopTotal) {
+                Utils.log("✅", "桌面应用周任务：本轮已完成，跳过");
+                return;
+            }
+            const weeklyRe = /WW_pcparent_RewardsApp_weekly/i;
+            const appHeaders = { ...RewardsAuto.desktopAppHeaders, "referer": "https://rewards.bing.com/earn" };
+            /**
+             * 从 quest 页 HTML 解析 pcchild 子项（Flight 数据反转义后按 offerId 就近取同对象字段）
+             * @param {string} raw quest 页 HTML
+             * @returns {Array<Object>} 子项（offerId/hash/title/href/isCompleted/isLocked）
+             */
+            const parseKids = (raw) => {
+                const t = String(raw || "")
+                    .replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+                    .replace(/\\"/g, '"');
+                const kids = [];
+                const re = /"offerId"\s*:\s*"([A-Za-z0-9_]*_pcchild[^"]+)"/g;
+                let m;
+                while ((m = re.exec(t)) !== null) {
+                    const seg = t.slice(Math.max(0, m.index - 500), m.index + 600);
+                    const after = t.slice(m.index, m.index + 700);
+                    kids.push({
+                        offerId: m[1],
+                        hash: (seg.match(/"hash"\s*:\s*"([^"]{8,})"/) || [])[1] || "",
+                        href: (seg.match(/"(?:href|destination)"\s*:\s*"([^"]+)"/) || [])[1] || "",
+                        title: (((seg.match(/"(?:ariaLabel|linkText)"\s*:\s*"([^"]{2,80})"/) || [])[1] || "").trim()) || m[1],
+                        isCompleted: /"isCompleted"\s*:\s*true/.test(after),
+                        isLocked: /"isLocked"\s*:\s*true/.test(after)
+                    });
+                }
+                return kids.filter((k) => k.hash);
+            };
+            /**
+             * 应用内搜索上报：先 ncheader 建立会话，再 reportActivity 上报搜索 URL
+             * @param {string} href 子项目标链接（bing.com/search?...）
+             * @returns {Promise<boolean>} 是否上报成功
+             */
+            const reportAppSearch = async (href) => {
+                try {
+                    await Utils.xhr({
+                        url: "https://www.bing.com/rewardsapp/ncheader",
+                        headers: { "x-rewards-source": "msrewards-desktop", "referer": "https://www.bing.com/" }
+                    }).catch(() => {});
+                    const res = await Utils.xhr({
+                        method: "POST", url: "https://www.bing.com/rewardsapp/reportActivity",
+                        headers: {
+                            "content-type": "application/x-www-form-urlencoded",
+                            "x-rewards-source": "msrewards-desktop", "referer": "https://www.bing.com/"
+                        },
+                        data: `url=${encodeURIComponent(href)}&V=web`
+                    });
+                    return /true/i.test(String(res || ""));
+                } catch (e) {
+                    Utils.debug("desktop-weekly", `应用内搜索上报失败: ${e.message}`);
+                    return false;
+                }
+            };
+            let earnHtml = "";
+            try {
+                earnHtml = await Utils.xhr({ url: "https://rewards.bing.com/earn", headers: appHeaders });
+            } catch (e) {
+                Utils.debug("desktop-weekly", `earn 页拉取失败: ${e.message}`);
+                return;
+            }
+            const parentIds = [...new Set([...String(earnHtml || "").matchAll(/\/earn\/quest\/([A-Za-z0-9_%.-]*punchcard[A-Za-z0-9_%.-]*)/g)].map((x) => x[1]))]
+                .map((id) => { try { return decodeURIComponent(id); } catch (_) { return id; } })
+                .filter((id) => weeklyRe.test(id));
+            if (!parentIds.length) {
+                Utils.debug("desktop-weekly", "本周没有 RewardsApp 每周专属任务卡");
+                return;
+            }
+            const actions = await API.resolveServerActions(String(earnHtml || ""));
+            const nextAction = actions && actions.reportActivity;
+            const deployMatch = String(earnHtml || "").match(/[?&](?:amp;)?dpl=([A-Za-z0-9._-]+)/)
+                || String(earnHtml || "").match(/"buildId"\s*:\s*"([A-Za-z0-9._-]+)"/);
+            const tree = ["", { children: ["(nav)", { children: ["earn", { children: ["PAGE", {}, null, null, 4096] }, null, null, 4096] }, null, null, 4096] }, null, null, 4096 + 16];
+            for (const parentId of parentIds) {
+                const pageUrl = "https://rewards.bing.com/earn/quest/" + encodeURIComponent(parentId);
+                Utils.log("🗓️", `发现桌面应用周任务卡：${parentId}`);
+                let qHtml = "";
+                try {
+                    qHtml = await Utils.xhr({ url: pageUrl, headers: appHeaders });
+                } catch (e) {
+                    Utils.log("🟡", `周任务详情页拉取失败: ${e.message}`);
+                    continue;
+                }
+                const kids = parseKids(qHtml);
+                if (!kids.length) {
+                    Utils.debug("desktop-weekly", `周任务 ${parentId} 未解析到子项`);
+                    continue;
+                }
+                this.desktopTotal += kids.length;
+                this.desktopDone += kids.filter((k) => k.isCompleted).length;
+                Utils.log("🗓️", `周任务子项 ${kids.length} 个（未完成 ${kids.filter((k) => !k.isCompleted).length} · 锁定 ${kids.filter((k) => k.isLocked).length}）`);
+                if (kids.every((k) => k.isCompleted)) {
+                    Utils.log("✅", "桌面应用周任务：全部子项已完成");
+                    continue;
+                }
+                for (const k of kids.filter((x) => !x.isCompleted && !x.isLocked)) {
+                    if (!this.touchRunLock()) throw new Error("RUN_LOCK_LOST");
+                    Utils.log("🗓️", `周任务子项「${k.title}」开始处理`);
+                    // 1) 先按子项类型触发一次真实动作（应用内搜索 / 打开落地页）
+                    if (/bing\.com\/search/i.test(k.href || "")) {
+                        const ok = await reportAppSearch(k.href);
+                        Utils.log(ok ? "✅" : "🟡", `周任务: 应用内搜索上报${ok ? "成功" : "未确认"}（${k.offerId}）`);
+                        await Utils.randomDelay(2500, 4500);
+                    } else if (k.href) {
+                        await Utils.xhr({ url: "https://rewards.bing.com" + k.href, headers: appHeaders }).catch(() => {});
+                        await Utils.randomDelay(2000, 3500);
+                    }
+                    // 2) 用桌面客户端身份交卷（Server Action，payload 与活动卡一致）
+                    if (!nextAction) {
+                        Utils.log("🟡", "周任务: 未解析到 reportActivity action id，无法交卷");
+                        continue;
+                    }
+                    try {
+                        const res = await Utils.xhr({
+                            method: "POST", url: "https://rewards.bing.com/earn",
+                            headers: {
+                                "accept": "text/x-component", "content-type": "text/plain;charset=UTF-8",
+                                "next-action": nextAction,
+                                "next-router-state-tree": encodeURIComponent(JSON.stringify(tree)),
+                                "referer": pageUrl, "origin": "https://rewards.bing.com",
+                                ...(deployMatch ? { "x-deployment-id": deployMatch[1] } : {}),
+                                ...RewardsAuto.desktopAppHeaders
+                            },
+                            data: JSON.stringify([k.hash, 11, { offerid: k.offerId, isPromotional: "$undefined", timezoneOffset: "-480" }])
+                        });
+                        const accepted = /^\d+:true\s*$/m.test(String(res || ""));
+                        if (accepted) {
+                            this.desktopStats.ok += 1;
+                            this.desktopDone += 1;
+                            Utils.log("✅", `周任务子项「${k.title}」交卷受理`);
+                        } else {
+                            this.desktopStats.fail += 1;
+                            Utils.log("🟡", `周任务子项「${k.title}」未受理（回执 ${String(res || "").slice(0, 60) || "空"}）`);
+                        }
+                    } catch (e) {
+                        this.desktopStats.fail += 1;
+                        Utils.log("🟡", `周任务子项「${k.title}」交卷失败: ${e.message}`);
+                    }
+                    await Utils.randomDelay(3000, 5000);
+                }
+                // 3) 到账复核：回读子项完成态（全部完成后服务端会撤下子项）
+                try {
+                    const after = await Utils.xhr({ url: pageUrl, headers: appHeaders });
+                    const afterKids = parseKids(after);
+                    const doneNow = afterKids.length === 0 ? kids.length : afterKids.filter((x) => x.isCompleted).length;
+                    this.desktopDone += Math.max(0, doneNow - kids.filter((x) => x.isCompleted).length);
+                    Utils.log(doneNow >= kids.length ? "✅" : "🟡",
+                        `周任务复核完成 ${doneNow}/${kids.length}${afterKids.length === 0 ? "（子项已撤下，按全部完成计）" : ""}`);
+                } catch (e) {
+                    Utils.debug("desktop-weekly", `周任务复核失败: ${e.message}`);
+                }
+            }
+            this.desktopDate = today;
+        },
+
         async doPromos() {
             if (!GM_getValue("Tasks.promos", true)) return;
             const today = RewardsAuto.state.dateNowNum;
@@ -3247,8 +3436,8 @@ Notice:
                 `✍️ 签到 PC${signPC} APP${signApp}`,
                 `📖 阅读 ${progressText(stats.read)} · 🔍 搜索 ${progressText(stats.search)}`,
                 `🎯 日常 ${fmtGroup(stats.dailySet)} · 任务卡 ${fmtGroup(stats.punchcard)}`,
-                `🎴 活动 ${fmtGroup(stats.evergreen)} · 打卡 ${stats.checkin.known ? `${stats.checkin.streak}天` : "—"}`,
-                `⚡ 成功 ${execOk} · 失败 ${execFail} · 待领 ${stats.claimable > 0 ? `+${stats.claimable}` : "0"}`
+                `🎴 活动 ${fmtGroup(stats.evergreen)} · 打卡 ${stats.checkin.known ? `${stats.checkin.streak}天` : "—"} · 🗓️ 周任务 ${this.desktopTotal > 0 ? `${this.desktopDone}/${this.desktopTotal}` : "—"}`,
+                `⚡ 成功 ${execOk} · 失败 ${execFail} · 待领 ${stats.claimable > 0 ? `+${stats.claimable}` : "0"} · 需人工 ${RewardsAuto.humanNeeded.size}`
             ];
             return lines.join("\n");
         },
@@ -3625,8 +3814,6 @@ Notice:
         },
 
         async runAll(force = false) {
-            // 连续 3 次确认完成后，定时触发只在本地判断并退出；手动“立即运行”可强制忽略
-            if (!force && this.isWaitingForNextDay()) return;
             if (this.running) {
                 Utils.log("🟡", "任务正在运行中，请勿重复触发");
                 return;
@@ -3641,7 +3828,9 @@ Notice:
             this.checkStartupGap();
             GM_setValue("Config.lastRunTs", Date.now());
             RewardsAuto.state.pc401 = false;
-            this._completionEvaluated = false;
+            RewardsAuto.humanNeeded.clear();
+            this.desktopTotal = 0;
+            this.desktopDone = 0;
             try {
                 RewardsAuto.state.startTime = Utils.getTimestamp();
                 Utils.log("🚀", "启动全能自动化任务...");
@@ -3702,6 +3891,13 @@ Notice:
                     await Utils.randomDelay();
                 }
                 await withRetry(() => this.doPromos(), "活动卡片");
+                // 桌面应用周任务：网页端身份不记账，必须用桌面客户端身份交卷；失败不影响主流程
+                try {
+                    await this.doDesktopWeeklyQuests();
+                } catch (e) {
+                    if (e.message === "RUN_LOCK_LOST") throw e;
+                    Utils.log("🟡", `桌面应用周任务异常: ${e.message}`);
+                }
                 await Utils.randomDelay();
                 await withRetry(() => this.doSearch(), "搜索");
                 // 搜索行为会触达服务端签到计数器，此处复核一次可修正上报被拒造成的误判
@@ -3756,8 +3952,6 @@ Notice:
                         (!stats.punchcard.known || stats.punchcard.done >= stats.punchcard.total) &&
                         (!stats.evergreen.known || stats.evergreen.done >= stats.evergreen.total)
                     ));
-                this.recordCompletion(allDone);
-                this._completionEvaluated = true;
                 const report = this.buildReport(stats, "final");
                 const hour = new Date().getHours();
                 // 全部完成推送一次日报；未完成则在 22 点后推送一次当日日报
@@ -3780,10 +3974,6 @@ Notice:
                     Utils.log("🔴", `本轮执行异常: ${e.message}`);
                 }
             } finally {
-                // 本轮未走到完成度判定（网络/地区/异常中止）时，不保留连续完成计数
-                if (!this._completionEvaluated) {
-                    try { this.recordCompletion(false); } catch (_) {}
-                }
                 this.running = false;
                 this.releaseRunLock();
             }
@@ -4394,8 +4584,6 @@ Notice:
     }
 
     const init = () => {
-        // 已锁定到次日时，不再做初始化/随机延时，避免每次定时唤醒都产生日志和请求
-        if (TaskManager.isWaitingForNextDay()) return;
         // 兜底：万一当前环境不支持 GM_addValueChangeListener（面板写入无回调），
         // 至少在下一次唤醒时立刻把面板里的授权码兑换掉，而不是干等它过期
         try {
@@ -4425,7 +4613,7 @@ Notice:
 
     try {
         // 已锁定到次日时连 Cookie 清理也跳过，避免每次定时唤醒产生任何副作用
-        if (typeof GM_cookie === "function" && !TaskManager.isWaitingForNextDay()) {
+        if (typeof GM_cookie === "function") {
             GM_cookie("delete", { url: "https://bing.com", name: "_EDGE_S" }, () => {});
         }
     } catch (_) {}

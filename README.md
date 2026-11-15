@@ -2,7 +2,7 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.7.0 · License：MIT
+> 版本：v1.8.0 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 > v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
 
@@ -14,8 +14,10 @@
 - **阅读**：新闻阅读任务，动态解析 Server Action 上报
 - **搜索**：真实热词池搜索 + 随机间隔，模拟真人行为；配额取 DAPI 搜索任务与 dashboard 服务端数据
 - **任务**：每日任务集、活动卡片、待领取积分（Server Action 自动领取）、连续签到奖励自动领取
-- **推送**：半程进度提醒、每日日报、异常提醒
-- **调度**：crontab 每 20 分钟后台运行；运行锁防并发；连续 3 天全部完成后次日自动跳过
+- **桌面应用周任务**：v1.8.0 新增，用 Rewards 桌面客户端身份完成「WW_pcparent_RewardsApp_weekly」周卡子项
+- **需人工分类**：v1.8.0 新增，Quiz 卡、+10 带锁拼图、App 内搜索卡、等级不足卡会被识别并跳过，在日报里计为「需人工」而不再当成失败重试
+- **推送**：半程进度提醒、每日日报、异常提醒（异常按 6 小时/同 key + 每小时 3 条节流）
+- **调度**：crontab 每 20 分钟后台运行；运行锁防并发；**每天固定运行，不会因为前几天已完成而跳过整日**
 - **调试**：Token 状态、调试日志环形缓冲、诊断数据一键导出
 
 ## 📲 推送渠道
@@ -97,6 +99,15 @@ scriptcat-ms-rewards/
 
 ## 🔧 改动记录
 
+### v1.8.0（每天必跑 + 桌面周任务 + 需人工分类 + 通知节流）
+
+- ❌ **彻底删除「连续 3 天全部完成后次日跳过」的跨日调度**（`readCompletionSchedule` / `isWaitingForNextDay` / `recordCompletion` 三个方法与全部调用点）。脚本现在**每天都会运行**，只要当天还有未完成项就继续补做；唯一的跳过是同轮并发保护（运行锁）
+- ✅ 新增**桌面应用周任务** `doDesktopWeeklyQuests()`：用 MSRewards 桌面客户端身份（UA + `X-MSRewards-App`）访问 `/earn`，定位 `WW_pcparent_RewardsApp_weekly` 周卡，解析 `pcchild` 子项，应用内搜索走 `rewardsapp/reportActivity`，交卷走 Server Action（`reportActivity`），最后回读复核
+- ✅ 新增**卡片原因分类** `_cardBlockReason()`：Quiz 卡（需落地页点答案）、`VerB_Locked_level` 带锁拼图（+10 只能真拼）、`form=ML2W4J/ML2Y2H` 应用内搜索卡、等级不足卡，命中即跳过并计入「需人工」，不再反复重试污染失败计数
+- ✅ 新增**通知分层节流**：同一异常 key 6 小时内只推一次，全局每小时最多 3 条，超限只写日志；日报/完成通知不受影响
+- ✅ 日报新增「🗓️ 周任务 x/y」与「需人工 N」两项
+- 📄 新增「开源致谢」注释块与 README 感谢名单
+
 ### v1.7.0（更名 + 参考脚本对照结论）
 
 - ✅ 脚本更名为 **微软bing rewards积分获取（持续优化版）**；`@storageName` 未变，升级不丢配置与登录态
@@ -137,6 +148,25 @@ scriptcat-ms-rewards/
 ### v1.4.0 及以前
 
 - 原版功能：签到、阅读、搜索、每日任务集、连续签到、WorkBuddy/Webhook 推送等。
+
+## 🙏 感谢
+
+本脚本站在这些开源作品的肩膀上，特此致谢（按对本脚本的影响排序）：
+
+| 项目 | 作者 | 仓库 | 对本脚本的帮助 |
+| --- | --- | --- | --- |
+| 微软积分（持续修复版） | yehai | <https://gitee.com/yehai/bing-rewards> | **本脚本的直接上游**：整体任务编排、运行锁、签到/阅读/搜索/日常流程均源自此项目 |
+| 微软积分（优化版） | hidmould | <https://github.com/hidmould/MicrosoftPoints> | v1.8.0 的「需人工分类」与「通知节流」结论直接来自其代码注释中的实测记录（Quiz 卡必须真作答、+10 带锁拼图必须真拼、应用搜索签名 `form=ML2W4J/ML2Y2H`、`PUBL=RewardsDO` 只是跟踪参数） |
+| Get Microsoft Rewards (修复/增强版) | Muverix | <https://github.com/Muverix/Get-Microsoft-Rewards> | 等级门槛与「待领取积分」判定的思路（`lacksLevel` / `detectClaimableAmount`） |
+| Get Microsoft Rewards | QingJ | <https://github.com/QingJ01> | 上述同类脚本的共同起点，本脚本的谱系源头 |
+
+同时感谢：
+
+- **ScriptCat（脚本猫）** 提供运行环境与分发平台：<https://scriptcat.org>
+- hidmould 在其 README 中致谢的 **ScriptCat001、DuskLight、潘矩森** 等社区贡献者
+- 以及所有在 Rewards 改版后无偿分享实测结论（接口下线、RSC 解析、Server Action 定位）的脚本作者
+
+本项目继续以 MIT 协议开源，欢迎在此基础上继续修复。
 
 ## ⚠️ 免责声明
 
