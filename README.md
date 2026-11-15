@@ -2,7 +2,7 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.5.0 · License：MIT
+> 版本：v1.5.1 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块。
 
 ---
@@ -39,12 +39,15 @@
 - **最新版直链**：[microsoft-rewards-scriptcat.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js)
 - 历史版本：[Releases 页面](https://github.com/vfuncyy/scriptcat-ms-rewards/releases)
 
+> 脚本头部已声明 `@updateURL` / `@downloadURL`（始终指向最新 Release 资产）：在脚本猫中开启「检查更新」即可自动升级到最新版。
+
 ## 📦 安装使用
 
 1. 浏览器安装 [脚本猫 ScriptCat](https://scriptcat.org/) 扩展（Chrome / Edge / Firefox）；
 2. 将 `微软积分（持续修复版·优化）.user.js` 导入脚本猫（拖入扩展或新建脚本粘贴全文）；
 3. 首次使用：脚本菜单 →「🔑 手动授权」→ 登录微软账户完成 OAuth 授权；
-4. 之后由 crontab（`*/20 * * * *`）自动运行，无需人工干预。
+4. 之后由 crontab（`*/20 * * * *`）自动运行，无需人工干预；
+5. 自动更新：脚本已内置 `@updateURL`/`@downloadURL`，在脚本猫中开启「检查更新」后，新发布的 Release 会自动拉取升级（随附的 `script.options.json` 已默认开启）。
 
 ## ⚙️ 配置说明
 
@@ -88,6 +91,13 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v1.5.1
+
+- ✅ 新增 `@updateURL` / `@downloadURL`（指向 Releases 最新版直链），脚本猫可自动检查并拉取更新
+- ✅ 补充 `@homepageURL` / `@supportURL` 元数据
+- ✅ `script.options.json` 开启 `check_for_updates`
+- 业务逻辑无改动
 
 ### v1.5.0（本仓库）
 

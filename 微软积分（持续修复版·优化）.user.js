@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软积分（持续修复版·优化）
 // @namespace    https://rewards.bing.com/
-// @version      1.5.0
+// @version      1.5.1
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；连续 3 次确认全部完成后次日再运行；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -33,6 +33,10 @@
 // @grant        GM_setClipboard
 // @grant        GM_addValueChangeListener
 // @storageName  BingRewardsAuto_Shared
+// @homepageURL  https://github.com/vfuncyy/scriptcat-ms-rewards
+// @supportURL   https://github.com/vfuncyy/scriptcat-ms-rewards/issues
+// @updateURL    https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js
+// @downloadURL  https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js
 // @tips         此脚本为开源免费使用，请勿购买
 // ==/UserScript==
 
