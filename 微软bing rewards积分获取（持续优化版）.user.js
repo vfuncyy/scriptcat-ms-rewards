@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.0
+// @version      1.8.1
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -715,7 +715,7 @@ Notice:
                 const map = new Map();
                 cookies.forEach(c => map.set(c.name, c.value));
                 const str = [...map.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
-                // Cookie 明细仅保存在调试缓冲区，可在「🔧 调试信息」查看
+                // Cookie 明细仅保存在调试缓冲区，可在菜单「🔧 诊断信息 → 1」查看
                 Utils.debug("cookie", `Cookie(${url}): ${map.size ? map.size + " 项 [" + [...map.keys()].slice(0, 12).join(",") + "]" : "空"}`);
                 return str;
             });
@@ -4076,26 +4076,8 @@ Notice:
         return false;
     }
 
-    GM_registerMenuCommand("⚡ 兑换面板授权码", async () => {
-        const raw = GM_getValue("Config.code", "");
-        if (!raw || !String(raw).trim()) {
-            Utils.safeAlert("⚠️ 设置面板里的「授权码链接」是空的。\n请先点击「🔑 手动授权」，把跳转后的完整网址粘进面板再试。");
-            return;
-        }
-        const code = Utils.extractAuthCode(raw);
-        if (!code) {
-            Utils.safeAlert("⚠️ 面板里的内容不是有效授权码。\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转网址。");
-            return;
-        }
-        // 手动触发的兑换不受 codeClaim 限制（用户明确要求重试）
-        GM_setValue("Config.codeClaim", code);
-        Utils.safeAlert("✅ 已读取面板授权码，正在兑换 Token...");
-        try {
-            await exchangeAndReport(code, "🎉 面板授权码兑换成功，授权已完成");
-        } catch (e) {
-            Utils.safeAlert(`⚠️ 兑换出错: ${e.message}`);
-        }
-    });
+    // v1.8.1：原「⚡ 兑换面板授权码」已并入「📋 粘贴/兑换授权码」（弹窗留空即读取面板里的授权码），
+    // 三个授权入口收敛为两个，避免同名功能分散在菜单里
 
     /**
      * 面板写入监听：ScriptCat/Tampermonkey 的 GM_addValueChangeListener 会在其他上下文
@@ -4112,10 +4094,44 @@ Notice:
         }
     } catch (_) {}
 
-    GM_registerMenuCommand("📋 粘贴授权码", async () => {
-        const input = Utils.safePrompt("粘贴授权页面跳转后的完整URL（或直接粘贴授权码）:");
-        if (!input?.trim()) return;
-        const code = Utils.extractAuthCode(input);
+    GM_registerMenuCommand("📋 粘贴/兑换授权码", async () => {
+        const input = Utils.safePrompt(
+            "粘贴授权页面跳转后的完整URL（或直接粘贴授权码）:\n\n"
+            + "· 留空确定 = 使用设置面板里已填的「授权码链接」\n"
+            + "· 取消 = 不做任何操作"
+        );
+        // 取消：safePrompt 返回 null
+        if (input === null || input === undefined) return;
+        const typed = String(input).trim();
+
+        // 留空分支：等价于原「⚡ 兑换面板授权码」，读取设置面板里填写的内容
+        if (!typed) {
+            const panelRaw = String(GM_getValue("Config.code", "") || "").trim();
+            if (!panelRaw) {
+                Utils.safeAlert("⚠️ 设置面板里的「授权码链接」也是空的。\n请先点击「🔑 手动授权」，把跳转后的完整网址粘进弹窗或设置面板。");
+                return;
+            }
+            const panelCode = Utils.extractAuthCode(panelRaw);
+            if (!panelCode) {
+                Utils.safeAlert("⚠️ 面板里的内容不是有效授权码。\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转网址。");
+                return;
+            }
+            // 手动触发的兑换不受 codeClaim 限制（用户明确要求重试）
+            GM_setValue("Config.codeClaim", panelCode);
+            Utils.safeAlert("✅ 已读取面板授权码，正在兑换 Token...");
+            try {
+                const res = await exchangeAndReport(panelCode, "🎉 面板授权码兑换成功，授权已完成");
+                // 兑换成功后清掉面板里的码，避免下一轮定时把一次性码再兑换一次
+                if ((res.ok || res.concurrentOk) && String(GM_getValue("Config.code", "") || "").trim() === panelRaw) {
+                    GM_setValue("Config.code", "");
+                }
+            } catch (e) {
+                Utils.safeAlert(`⚠️ 兑换出错: ${e.message}`);
+            }
+            return;
+        }
+
+        const code = Utils.extractAuthCode(typed);
         if (!code) {
             Utils.safeAlert("⚠️ 未识别到有效授权码！\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转URL。");
             return;
@@ -4130,7 +4146,7 @@ Notice:
         }
     });
 
-    GM_registerMenuCommand("📊 Token状态", () => {
+    GM_registerMenuCommand("📊 运行状态", () => {
         const token = GM_getValue("Config.token", false);
         const time = GM_getValue("Config.tokenTime", 0);
         let ageStr = "未知";
@@ -4153,10 +4169,27 @@ Notice:
         const errLine = lastErr
             ? `最近错误: [${new Date(Number(lastErr.t) || 0).toLocaleTimeString("zh-CN")}] ${lastErr.grant} → ${lastErr.error} ${lastErr.description || ""}`
             : "最近错误: 无";
-        Utils.safeAlert(`RefreshToken: ${token ? "已保存" : "无"}\n获取时间: ${tokenDate}\n已过: ${ageStr}\nAccessToken: ${accessState}\n授权码: ${GM_getValue("Config.code", "") ? "有" : "无"}\n${errLine}`);
+        // v1.8.1：状态面板补上推送与今日进度，避免用户再去别处确认
+        const pushCfg = PushPlus.read();
+        const pushState = PushPlus.ready()
+            ? "PushPlus（微信）+ 浏览器通知"
+            : (pushCfg.enabled ? "仅浏览器通知（PushPlus 未配 Token）" : "仅浏览器通知（PushPlus 已关闭）");
+        const broState = GM_getValue("Notice.bro", true) ? "开" : "关";
+        const todayDone = [["签到", TaskManager.signDate], ["阅读", TaskManager.readDate], ["活动", TaskManager.promosDate], ["搜索", TaskManager.searchDate]]
+            .filter(([, d]) => d === RewardsAuto.state.dateNowNum).length;
+        Utils.safeAlert(
+            `RefreshToken: ${token ? "已保存" : "无"}\n`
+            + `获取时间: ${tokenDate}\n已过: ${ageStr}\n`
+            + `AccessToken: ${accessState}\n授权码: ${GM_getValue("Config.code", "") ? "有" : "无"}\n`
+            + `${errLine}\n\n`
+            + `今日进度: ${todayDone}/4 项（签到·阅读·活动·搜索）\n`
+            + `浏览器通知: ${broState}\n推送目标: ${pushState}\n`
+            + `版本: ${GM_info.script.version}`
+        );
     });
 
-    GM_registerMenuCommand("🚀 立即运行（忽略次日锁定）", () => {
+    // v1.8.1：去掉「忽略次日锁定」——跨日跳过逻辑已在 v1.8.0 删除，标签留着会误导
+    GM_registerMenuCommand("🚀 立即运行", () => {
         TaskManager.runAll(true).catch(e => Utils.log("🔴", `手动运行失败: ${e.message}`));
     });
 
@@ -4178,7 +4211,7 @@ Notice:
             "",
             `实际推送目标: ${PushPlus.ready() ? "PushPlus（微信）" : "仅浏览器通知"}`,
             "",
-            "输入 1 配置 Token，输入 2 切换推送开关，输入 9 清空 Token，输入 0 退出："
+            "输入 1 配置 Token，输入 2 切换推送开关，输入 3 发送测试消息，输入 9 清空 Token，输入 0 退出："
         ];
         const choice = Utils.safePrompt(lines.join("\n"));
         if (!choice) return;
@@ -4197,6 +4230,29 @@ Notice:
             Utils.safeAlert(`PushPlus 推送已${!cfg.enabled ? "开启" : "关闭"}！`);
             return;
         }
+        if (num === 3) {
+            // v1.8.1：原「📢 测试通知」并入此处；同时修掉一个老问题——
+            // 旧写法先设 state.sendMSG 再调 Utils.log(…, true)，而 log 内部会用 `${icon} ${msg}`
+            // 覆盖 sendMSG，导致推出去的是「📢 测试通知已发送」而不是自定义测试文案
+            const testText = "🧪 这是一条测试消息\n如果你看到这条消息，说明通知接口配置成功！";
+            RewardsAuto.state.sendMSG = testText;
+            try { GM_log("📢", testText); } catch (_) {}
+            if (GM_getValue("Notice.bro", true)) {
+                try { GM_notification({ title: GM_info.script.name, text: testText }); } catch (_) {}
+            }
+            const nowCfg = PushPlus.read();
+            if (PushPlus.ready()) Utils.sendPushPlus();
+            const testLines = [
+                "📢 测试消息已发出",
+                `浏览器通知: ${GM_getValue("Notice.bro", true) ? "已发送" : "已关闭"}`,
+                `PushPlus 微信推送: ${PushPlus.ready() ? "已发送（结果见脚本日志）" : (nowCfg.enabled ? "未配置 Token" : "已关闭")}`
+            ];
+            if (!PushPlus.ready()) {
+                testLines.push("", "配置方式：本菜单输入 1 填 Token，或脚本设置面板 Notice 分组");
+            }
+            Utils.safeAlert(testLines.join("\n"));
+            return;
+        }
         if (num === 9) {
             if (!Utils.safeConfirm("确定清空 PushPlus Token 吗？清空后仅使用浏览器通知。")) return;
             GM_setValue("Notice.pushplusToken", "");
@@ -4206,26 +4262,13 @@ Notice:
         Utils.safeAlert("无效的编号！");
     });
 
-    GM_registerMenuCommand("📢 测试通知", async () => {
-        RewardsAuto.state.sendMSG = "🧪 这是一条测试消息\n如果你看到这条消息，说明通知接口配置成功！";
-        Utils.log("📢", "测试通知已发送", true);
-        const cfg = PushPlus.read();
-        const lines = [
-            "📢 测试消息已发出",
-            `浏览器通知: ${GM_getValue("Notice.bro", true) ? "已发送" : "已关闭"}`,
-            `PushPlus 微信推送: ${PushPlus.ready() ? "已发送（结果见脚本日志）" : (cfg.enabled ? "未配置 Token" : "已关闭")}`
-        ];
-        if (!PushPlus.ready()) {
-            lines.push("", "配置方式：菜单「🔔 配置 PushPlus 推送」或脚本设置面板 Notice 分组");
-        }
-        Utils.safeAlert(lines.join("\n"));
-    });
+    // v1.8.1：原「📢 测试通知」已并入「🔔 配置 PushPlus 推送」的第 3 项，此处不再单独注册菜单
 
     /**
      * 调试信息面板：汇总环境、账号、任务、登录与最近接口响应
      * 默认不在日志中输出调试细节，需要时从菜单统一查看
      */
-    GM_registerMenuCommand("🔧 调试信息", async () => {
+    async function showDebugInfo() {
         /**
          * 构造调试信息文本
          * @returns {Promise<string>} 分区后的调试文本
@@ -4310,7 +4353,7 @@ Notice:
         } catch (e) {
             try { Utils.safeAlert(`⚠️ 调试信息采集失败：${e.message}`); } catch (_) { notify(`采集失败：${e.message}`); }
         }
-    });
+    }
 
 
 
@@ -4319,7 +4362,7 @@ Notice:
      * - 覆盖 getuserinfo、DAPI(options=511/613)、earn、dashboard
      * - 自动脱敏账号标识与凭证，不导出 Token
      */
-    GM_registerMenuCommand("🧪 导出诊断数据", async () => {
+    async function exportDiagnostics() {
         /**
          * 递归脱敏：移除账号标识与凭证字段
          * @param {*} input 原始数据
@@ -4464,31 +4507,11 @@ Notice:
                 lastTokenError: GM_getValue("Config.lastTokenError", null),
                 endpoints: {}
             };
-            try {
-                const userInfoText = await Utils.xhr({
-                    url: `https://rewards.bing.com/api/getuserinfo?type=1&X-Requested-With=XMLHttpRequest&_=${Date.now()}`,
-                    headers: {
-                        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.pc,
-                        "referer": "https://rewards.bing.com/",
-                        "x-requested-with": "XMLHttpRequest"
-                    },
-                    anonymous: false
-                });
-                const parsed = Utils.isJSON(userInfoText) ? JSON.parse(userInfoText) : null;
-                const dashboard = parsed?.dashboard || parsed;
-                report.endpoints.getuserinfo = {
-                    dashboardKeys: dashboard ? Object.keys(dashboard) : [],
-                    userStatus: dashboard?.userStatus,
-                    dailySetPromotions: dashboard?.dailySetPromotions,
-                    morePromotions: dashboard?.morePromotions,
-                    dashboard
-                };
-            } catch (e) {
-                report.endpoints.getuserinfo = { error: e.message };
-            }
+            // v1.8.1：/api/getuserinfo 已于 2026-11 下线（实测 401 旧版错误页），改为采集 dashboard 的 RSC 数据
+            try { report.endpoints.dashboardRSC = await API.getDashboardData(true); } catch (e) { report.endpoints.dashboardRSC = { error: e.message }; }
             try { report.endpoints.dapi511 = await fetchDAPI(511); } catch (e) { report.endpoints.dapi511 = { error: e.message }; }
-            try { report.endpoints.dapi613 = await fetchDAPI(613); } catch (e) { report.endpoints.dapi613 = { error: e.message }; }
+            // options=613 的 counters 恒为 null（实测），不再重复采集；领取动作 ID 才是排障关键
+            try { report.endpoints.claimActionId = await API.getClaimActionId(); } catch (e) { report.endpoints.claimActionId = { error: e.message }; }
             try { report.endpoints.rewardsInfo = await API.getRewardsInfo(); } catch (e) { report.endpoints.rewardsInfo = { error: e.message }; }
             try { report.endpoints.balance = await API.getBalance(); } catch (e) { report.endpoints.balance = { error: e.message }; }
             try {
@@ -4551,6 +4574,25 @@ Notice:
                 try { GM_notification({ title: "🧪 诊断数据采集失败", text: e.message }); } catch (_) {}
             }
         }
+    }
+
+    // 菜单注册：诊断相关收成一个入口，避免「调试信息」与「导出诊断数据」两个近似项并列
+    GM_registerMenuCommand("🔧 诊断信息", async () => {
+        const choice = Utils.safePrompt(
+            "🔧 诊断信息\n"
+            + "==================\n\n"
+            + "1 = 查看运行调试信息（账号/任务/接口状态，查看后可复制）\n"
+            + "2 = 导出完整诊断 JSON（含各接口原始字段，排障时用）\n"
+            + "0 = 退出"
+        );
+        // 后台上下文（ScriptCat 的菜单常在无 DOM 的上下文执行）拿不到弹窗时默认走「查看调试信息」，
+        // 该分支自带降级：复制到剪贴板 + 系统通知 + 打开 rewards 页展示
+        const raw = choice === null || choice === undefined ? "" : String(choice).trim();
+        const num = raw || (typeof document === "undefined" ? "1" : "");
+        if (!num || num === "0") return;
+        if (num === "1") { await showDebugInfo(); return; }
+        if (num === "2") { await exportDiagnostics(); return; }
+        Utils.safeAlert("无效的编号！");
     });
 
     const updateBroMenu = () => {
@@ -4612,7 +4654,7 @@ Notice:
     };
 
     try {
-        // 已锁定到次日时连 Cookie 清理也跳过，避免每次定时唤醒产生任何副作用
+        // v1.8.1：注释同步——跨日锁定已删除，这里是无条件清理 _EDGE_S，避免 Edge 会话残留导致签到被判定为异地
         if (typeof GM_cookie === "function") {
             GM_cookie("delete", { url: "https://bing.com", name: "_EDGE_S" }, () => {});
         }
