@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.1
+// @version      1.8.2
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -152,7 +152,7 @@ Notice:
             app: "Mozilla/5.0 (Linux; Android 16; Redmi K20 Pro Build/BP4A.251205.006; ) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/144.0.7559.132 Mobile Safari/537.36 BingSapphire/32.6.2110003560",
         },
         desktopAppHeaders: {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) MSRewards/Desktop/1.4.56",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) MSRewards/Desktop/1.12.0.0",
             "X-MSRewards-App": "1",
             "X-Rewards-Source": "msrewards-desktop"
         },
@@ -1249,7 +1249,7 @@ Notice:
                     if (!searchQuotaFound) {
                         const userInfoResult = await this.getSearchQuotaFromUserInfo();
                         if (userInfoResult) {
-                            Utils.log("🟢", "页面未命中搜索配额，使用 getuserinfo 兜底");
+                            Utils.log("🟢", "页面未命中搜索配额，使用 dashboard 服务端数据兜底");
                             return {
                                 ...base,
                                 balance: userInfoResult.balance ?? base.balance,
@@ -1727,7 +1727,7 @@ Notice:
                 if (info.pc && info.pc.max > 0) {
                     stats.search = { progress: info.pc.progress, max: info.pc.max, known: true };
                 }
-                // getuserinfo 兜底会返回阅读进度，不能因为页面未命中搜索配额就丢掉
+                // dashboard 服务端数据兜底会返回阅读进度，不能因为页面未命中搜索配额就丢掉
                 if (info.readProgress != null) {
                     stats.read = {
                         progress: Number(info.readProgress) || 0,
@@ -2924,7 +2924,8 @@ Notice:
             // 版本升级时清掉旧版本可能误写的“今日已完成”标记，
             // 否则新版本当天会直接跳过活动/日常任务（v1.3.1/v1.3.2 都有这类残留）。
             // v1.6.0 更换了数据源（dashboard RSC + DAPI 字段适配），升级时重置一次当日尝试状态
-            const engineVersion = "1.6.0";
+            // v1.8.2 调整了活动卡片/每日活动的尝试计数语义，升版时再重置一次旧尝试态
+            const engineVersion = "1.8.2";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -3153,6 +3154,8 @@ Notice:
             }
             const weeklyRe = /WW_pcparent_RewardsApp_weekly/i;
             const appHeaders = { ...RewardsAuto.desktopAppHeaders, "referer": "https://rewards.bing.com/earn" };
+            // v1.8.2：交卷 500 时每轮只告警一次，其余写入调试缓冲（避免每天刷 6 条黄字）
+            const submit500Notified = { value: false };
             /**
              * 从 quest 页 HTML 解析 pcchild 子项（Flight 数据反转义后按 offerId 就近取同对象字段）
              * @param {string} raw quest 页 HTML
@@ -3262,6 +3265,12 @@ Notice:
                         Utils.log("🟡", "周任务: 未解析到 reportActivity action id，无法交卷");
                         continue;
                     }
+                    const submitPayload = [k.hash, 11, { offerid: k.offerId, isPromotional: "$undefined", timezoneOffset: "-480" }];
+                    // v1.8.2：每轮记录一次完整 payload 样本，供定位交卷 500 根因
+                    if (!submit500Notified.payloadLogged) {
+                        submit500Notified.payloadLogged = true;
+                        Utils.log("🟢", `周任务交卷 payload 样本: ${JSON.stringify(submitPayload)} action=${nextAction}`);
+                    }
                     try {
                         const res = await Utils.xhr({
                             method: "POST", url: "https://rewards.bing.com/earn",
@@ -3273,9 +3282,10 @@ Notice:
                                 ...(deployMatch ? { "x-deployment-id": deployMatch[1] } : {}),
                                 ...RewardsAuto.desktopAppHeaders
                             },
-                            data: JSON.stringify([k.hash, 11, { offerid: k.offerId, isPromotional: "$undefined", timezoneOffset: "-480" }])
+                            data: JSON.stringify(submitPayload)
                         });
                         const accepted = /^\d+:true\s*$/m.test(String(res || ""));
+                        Utils.debug("desktop-submit", `子项「${k.title}」回执原文: ${String(res || "")}`);
                         if (accepted) {
                             this.desktopStats.ok += 1;
                             this.desktopDone += 1;
@@ -3286,7 +3296,16 @@ Notice:
                         }
                     } catch (e) {
                         this.desktopStats.fail += 1;
-                        Utils.log("🟡", `周任务子项「${k.title}」交卷失败: ${e.message}`);
+                        // v1.8.2：HTTP 500 每轮只发一次告警，其余写调试缓冲（避免每天刷 6 条黄字）
+                        if (/HTTP\s+500/.test(e.message)) {
+                            Utils.debug("desktop-submit", `子项「${k.title}」交卷 500 详情: ${e.message}`);
+                            if (!submit500Notified.value) {
+                                submit500Notified.value = true;
+                                Utils.log("🟡", "周任务交卷返回 HTTP 500（本轮子项仅此一次告警，逐项回执见调试日志）");
+                            }
+                        } else {
+                            Utils.log("🟡", `周任务子项「${k.title}」交卷失败: ${e.message}`);
+                        }
                     }
                     await Utils.randomDelay(3000, 5000);
                 }
@@ -3316,6 +3335,7 @@ Notice:
                     this.promosDate === today ? "活动卡片已完成" : "活动卡片本轮已尝试 3 次，等待下次运行");
                 return;
             }
+            // v1.8.2：本轮先计数；若本轮成功完成则在末尾清零（失败才累计，上限 3）
             attempt.count++;
             GM_setValue(attemptKey, attempt);
             let ok = 0, fail = 0;
@@ -3378,7 +3398,11 @@ Notice:
             this.promoStats = { ok, fail };
             const unconfirmed = RewardsAuto.unconfirmedOfferIds.size - unconfirmedBefore;
             // 只有全部成功、没有待确认项且 DAPI 列表可读时才标记完成；否则下一轮继续补做
-            if (fail === 0 && unconfirmed === 0 && dapiOk) this.promosDate = today;
+            if (fail === 0 && unconfirmed === 0 && dapiOk) {
+                this.promosDate = today;
+                // v1.8.2：成功即清零尝试计数，避免偶发失败耗尽次数后罢工
+                GM_setValue(attemptKey, { date: today, count: 0 });
+            }
             this.save();
             GM_log(`🔵 活动完成: ${ok}成功/${fail}失败${unconfirmed > 0 ? `/${unconfirmed}待确认` : ""}`);
         },
@@ -3573,6 +3597,7 @@ Notice:
                 Utils.log("🟡", "每日活动本轮已尝试 3 次，等待下次运行");
                 return;
             }
+            // v1.8.2：本轮先计数；若本轮成功完成则在末尾清零（失败才累计，上限 3）
             attempt.count++;
             GM_setValue(attemptKey, attempt);
             const processedKey = "Config.dailySetProcessed";
@@ -3623,7 +3648,11 @@ Notice:
             const unconfirmed = RewardsAuto.unconfirmedOfferIds.size - unconfirmedBefore;
             // 预检显示服务端仍有未完成日常任务时，不因“没发现卡片”而提前标记完成
             // 全部成功且没有待确认项才标记完成；否则下一轮继续补做
-            if (fail === 0 && unconfirmed === 0 && !serverDailyPending) this.dailySetDate = today;
+            if (fail === 0 && unconfirmed === 0 && !serverDailyPending) {
+                this.dailySetDate = today;
+                // v1.8.2：成功即清零尝试计数，避免偶发失败耗尽次数后罢工
+                GM_setValue(attemptKey, { date: today, count: 0 });
+            }
             this.save();
             if (ok > 0 || fail > 0 || unconfirmed > 0) {
                 GM_log(`🔵 每日活动完成: ${ok}成功/${fail}失败${unconfirmed > 0 ? `/${unconfirmed}待确认` : ""}`);
