@@ -2,14 +2,7 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v2.2.0 · License：MIT
->
-> **v2.2 起拆成两个脚本**，必须**成对安装**：
-> - `微软bing rewards积分获取（持续优化版）.user.js` —— **定时脚本**（`@crontab */20 * * * *`），只负责后台自动化与写统计快照，没有任何界面；
-> - `微软奖励控制台.user.js` —— **页面脚本**（`@match https://rewards.bing.com/*` 等），只负责在网页里渲染暗色控制台与七个菜单面板，不自己抓数据。
->
-> 两者共用 `@storageName BingRewardsAuto_Shared`，通过共享存储交换状态；只装其中一个会缺少另一半功能。
->
+> 版本：v1.8.6 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 > v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
 
@@ -21,99 +14,11 @@
 - **阅读**：新闻阅读任务，动态解析 Server Action 上报
 - **搜索**：真实热词池搜索 + 随机间隔，模拟真人行为；配额取 DAPI 搜索任务与 dashboard 服务端数据
 - **任务**：每日任务集、活动卡片、待领取积分（Server Action 自动领取）、连续签到奖励自动领取
+- **桌面应用周任务**：v1.8.0 新增，用 Rewards 桌面客户端身份完成「WW_pcparent_RewardsApp_weekly」周卡子项
 - **需人工分类**：v1.8.0 新增，Quiz 卡、+10 带锁拼图、App 内搜索卡、等级不足卡会被识别并跳过，在日报里计为「需人工」而不再当成失败重试
 - **推送**：半程进度提醒、每日日报、异常提醒（异常按 6 小时/同 key + 每小时 3 条节流）
 - **调度**：crontab 每 20 分钟后台运行；运行锁防并发；**每天固定运行，不会因为前几天已完成而跳过整日**
-- **控制台面板**：v2.0 新增，运行状态 / 调试信息 / 诊断数据统一成暗色可视化面板——指标条（今日得分、任务完成、余额、连续签到）+ 任务队列行 + 实时日志 + 可折叠原文，Shadow DOM 隔离宿主页样式，Esc 或点遮罩关闭
-- **菜单即面板**：v2.1 起六个菜单项（手动授权 / 粘贴兑换授权码 / 运行状态 / 立即运行 / PushPlus 推送 / 诊断信息）点开就是对应面板，不再弹 `prompt`、`confirm`、`alert`；带输入框、开关、提示条与操作按钮
-- **双脚本架构**：v2.2 起面板真正跑得起来——定时脚本在 `service_worker` 里做自动化并写快照，页面脚本在 `rewards.bing.com` 等页面渲染面板；七个菜单项（含新增的通知设置）全部可用，跨脚本通过 `Config.openPanel` / `lastStats` / `lastRunTs` / `lastDebugInfo` / `runRequest` 五个共享键联动
-
-## 🆕 v2.2 变更：为什么必须拆成两个脚本
-
-**问题现象**：v2.1 把六个菜单项都改成了面板，但装上去之后「点菜单没反应、界面没有变化」。
-
-**根因**（贴 ScriptCat 源码）：`src/app/service/service_worker/runtime.ts` 的 `getParticularScriptList()` 里有一句硬判断——
-
-```js
-if (script.type !== SCRIPT_TYPE_NORMAL || script.status !== SCRIPT_STATUS_ENABLE) return undefined;
-```
-
-也就是说：**只有普通脚本（`type === NORMAL`）会被注册成页面脚本**。带 `@crontab` 的脚本类型是 `CRONTAB`，只在 `service_worker`/沙盒里跑，**永远不会被注入任何网页**。而面板第一行就是 `if (typeof document === "undefined") return null;`——后台没有 `document`，所以每个菜单项都拿到 `null`，全部掉进 `if (!panel)` 兜底，而那些兜底在后台基本是空操作（`safePrompt` 直接返回 `null`、`safeConfirm` 返回 `false`、`safeReload` 空转）。真机日志也印证：6 小时 139 条日志里 `service_worker` 131 条、`sandbox` 8 条且全是空的 `exec script complete`，页面侧从不执行。
-
-**这不是 v2.1 引入的回归**——v1.8.6 同样是 `@crontab` + `showPanel`，从第一天起就没在页面里渲染过，只是旧版每项都先 `safeAlert` 一段文字，看起来「有反应」。
-
-**解法：按职责拆开**
-
-| | 定时脚本（原文件） | 控制台脚本（新增） |
-| --- | --- | --- |
-| 类型 | `@crontab */20 * * * *` | 普通脚本（`@match`，无 `@crontab`） |
-| 运行位置 | `service_worker` 沙盒 | `rewards.bing.com` / `*.bing.com` / OAuth 回调页 |
-| 职责 | 自动化、报表推送、写统计快照 | 渲染七个面板、写配置、兑换授权码 |
-| 有无界面 | 无 | 全部界面都在这里 |
-| 体积 | 222,997 B / 3,989 行 | 90,985 B / 1,721 行 |
-
-两者共用 `@storageName BingRewardsAuto_Shared`（ScriptCat 的 `getStorageName()` 同名即同库），联动全靠这五个键：
-
-| 键 | 写入方 | 读取方 | 含义 |
-| --- | --- | --- | --- |
-| `Config.lastStats` | 定时脚本每轮结束 | 控制台 | `{ t, stats, report }` 服务端统计快照 |
-| `Config.lastRunTs` | 定时脚本 | 控制台 | 上一轮完成时间戳 |
-| `Config.lastDebugInfo` / `lastDebugInfoAt` | 定时脚本 | 控制台 | 五段式调试文本与写入时间 |
-| `Config.runRequest` | 控制台「立即运行」 | 定时脚本 `init()` | 「尽快执行」标记，下一轮 tick 优先跑 |
-| `Config.openPanel` | 定时脚本七个菜单 | 控制台 | `{ key, t }`，15 秒内有效，页面侧代开对应面板 |
-
-**七个菜单项**（全部在控制台脚本里注册，点开即面板）：
-
-| 菜单项 | 面板内容 | 按钮 |
-| --- | --- | --- |
-| 🔑 手动授权 | 四步流程 + 授权链接 | 打开授权页面 / 复制链接 |
-| 📋 粘贴/兑换授权码 | 多行输入框（留空 = 用已保存的链接） | 兑换（异步，结果回写提示条）/ 清空输入 |
-| 📊 运行状态 | 指标条（真实快照）+ 十行任务进度 + 账号与推送日志 | 刷新 / 立即运行 / 关闭 |
-| 🚀 立即运行 | 本轮顺序说明 + 「网页无法直接唤起定时脚本」的说明 | 排队执行（写 `runRequest`） |
-| 🔔 配置 PushPlus 推送 | 开关 + Token 密码框 | 保存 / 发送测试 / 清空 Token |
-| 🔧 诊断信息 | 统计快照 / 调试文本 / 写入时间 / 当前页面 | 复制全部 |
-| 🔕 通知设置 | 浏览器通知开关 | 保存并刷新 |
-
-**定时脚本侧的菜单改成了「代开」**：点菜单 → 写 `Config.openPanel = {key, t}` → `GM_openInTab("https://rewards.bing.com/earn")` → 页面脚本加载后 `consumeOpenRequest()` 读到标记（15 秒时效）→ 弹对应面板。这样即使用户从后台脚本的菜单点进去，看到的也是真实面板。
-
-**已知限制**：`rewards.bing.com` 页面在某些环境下不允许扩展自动化（本机 `sctl page eval` 会报 `PAGE_NOT_AUTOMATABLE`），所以面板在 `cn.bing.com` 上同样注册（`@match https://cn.bing.com/*`），便于验证与日常使用。「立即运行」受 ScriptCat 调度机制限制无法真正即时唤起定时脚本，只能排队到下一个 20 分钟窗口；需要立刻跑可在扩展面板对定时脚本点「运行一次」。
-
-## 🆕 v2.1 / v2.0 变更与已知限制
-
-**v2.1 做了什么：菜单即面板**
-
-六个菜单项全部从原生弹窗改成对应面板，点开即见，不用再在 `prompt` 里读一行说明、再猜该输 `1` 还是 `2`：
-
-| 菜单项 | 面板内容 | 交互 |
-| --- | --- | --- |
-| 🔑 手动授权 | 四步流程说明 + 授权链接（可复制） | 「打开授权页面」「复制链接」 |
-| 📋 粘贴/兑换授权码 | 多行输入框（留空 = 用设置面板里已填的链接） | 「兑换」异步兑换 Token，结果回写提示条；「清空输入」 |
-| 📊 运行状态 | 指标条 + 任务队列 + 账号与推送日志 + 纯文本 | 「立即运行」「刷新」「关闭」，数据异步补齐 |
-| 🚀 立即运行 | 本轮五步顺序说明 | 「开始运行」 |
-| 🔔 配置 PushPlus 推送 | 开关 + Token（密码框）+ 动态摘要 | 「保存」「发送测试」「清空 Token」「关闭」 |
-| 🔧 诊断信息 | 两种输出说明 | 「查看调试信息」「导出诊断 JSON」「关闭」 |
-
-为此 `Utils.showPanel(opts)` 新增了 `opts.fields` 表单能力（`checkbox` / `text` / `password` / `textarea`，支持 `label`、`placeholder`、`hint`），按钮回调第三个参数拿到 `api`：`values()` / `setValue()` / `focusField()` / `setNote()` / `setFields()` / `close()`。`setNote()` 可随时改写顶部提示条（原来提示条只在建面板时能设一次，空值会把整条 `display:none` 掉，改为 `hidden` 后可以再次显示）。所有入口都保留 `if (!panel)` 兜底——后台上下文拿不到 DOM 时仍走旧逻辑，不会因为改了界面而丢功能。
-
-**v2.0 做了什么：界面重做 + 功能收敛**
-
-v2.0 是**界面重做 + 功能收敛**的一次大版本：把以前散落在 `alert` / `prompt` 里的信息统一收进暗色控制台面板，同时**移除一条始终没能跑通的通道**。
-
-**做了什么**
-
-- 面板内核重写：`Utils.panelCss()` + `Utils.buildPanelModel()` + `Utils.showPanel()`，Shadow DOM + `adoptedStyleSheets` 隔离样式，不再往宿主页里塞内联样式
-- 四个入口全部改用新面板：📊 运行状态、🔧 调试信息、🧪 诊断数据、跨上下文回显（后台触发时自动在 Rewards 页弹出）
-- 面板内容分四层：顶部指标条（今日得分 / 任务完成 / 账户余额 / 连续签到）、任务队列（授权 Token、PC 签到、App 签到、PC 搜索、新闻阅读、日常任务、任务卡、活动卡片、待领取积分，五态 `✓ ◐ · – !`）、等宽日志区、可折叠的「完整原文」（复制用）
-- 指标条数值来自 `API.getServerStats()`，面板先秒开、数据回来再刷新，不阻塞
-- 删除零引用的 `Utils.showTextPanel` 与全部面板内联样式代码
-
-**已知限制：桌面应用周任务已移除**
-
-v1.8.0 曾尝试用 Rewards 桌面客户端身份（伪造 `MSRewards/Desktop` UA + `X-MSRewards-App: 1` + `X-Rewards-Source: msrewards-desktop`）接「`WW_pcparent_RewardsApp_weekly` 周卡」：拉 `/earn` → 解析 `*_pcchild*` 子项 → 应用内搜索走 `bing.com/rewardsapp/reportActivity` → 交卷走 `reportActivity` Server Action（`[hash, 11, {offerid, isPromotional, timezoneOffset}]`）→ 回读复核。
-
-结果：**子项的搜索上报能成功，但交卷长期 HTTP 500**。v1.8.2 加 payload 样本日志与告警收敛、v1.8.5 加连接层详情与连续失败熔断，逐轮排查后确认根因是**服务端 Origin 白名单 —— 浏览器不允许 GM_xhr 自定义 `Origin`**，不是 action id 过期、也不是载荷格式问题。这条通道在当前「浏览器用户脚本」架构下走不通，v2.0 把整段落连同配置项一起删除，而不是留着一个永远失败的开关。
-
-> 需要周任务积分的话，只能人工在 Microsoft Rewards 桌面/手机 App 里完成，脚本不再代做，也不会再在日志里刷黄色告警。
+- **调试**：Token 状态、调试日志环形缓冲、诊断数据一键导出
 
 ## 📲 推送渠道
 
@@ -134,27 +39,21 @@ v1.8.0 曾尝试用 Rewards 桌面客户端身份（伪造 `MSRewards/Desktop` U
 
 ## ⬇️ 下载
 
-**v2.2 起需要两个文件，两个都要装**：
-
-| 文件 | 作用 | 直链 |
-| --- | --- | --- |
-| 定时脚本 | 后台自动化 + 写统计快照 | [microsoft-rewards-scriptcat.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js) |
-| 控制台脚本 | 七个菜单面板 | [microsoft-rewards-console.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-console.user.js) |
-
 - **ScriptCat 商店（推荐）**：[scriptcat.org](https://scriptcat.org/zh-CN/script-show-page/9092) · 一键安装 <https://scriptcat.org/scripts/code/9092/%E5%BE%AE%E8%BD%AFbing%20rewards%E7%A7%AF%E5%88%86%E8%8E%B7%E5%8F%96%EF%BC%88%E6%8C%81%E7%BB%AD%E4%BC%98%E5%8C%96%E7%89%88%EF%BC%89.user.js>
+- **最新版直链**：[microsoft-rewards-scriptcat.user.js](https://github.com/vfuncyy/scriptcat-ms-rewards/releases/latest/download/microsoft-rewards-scriptcat.user.js)
 - 历史版本：[Releases 页面](https://github.com/vfuncyy/scriptcat-ms-rewards/releases)
 
-> 两个脚本头部都声明了 `@updateURL` / `@downloadURL`（始终指向最新 Release 资产）：在脚本猫中开启「检查更新」即可自动升级到最新版。
+> 脚本头部已声明 `@updateURL` / `@downloadURL`（始终指向最新 Release 资产）：在脚本猫中开启「检查更新」即可自动升级到最新版。
 >
 > 商店版本从 GitHub 自动同步。
 
 ## 📦 安装使用
 
 1. 浏览器安装 [脚本猫 ScriptCat](https://scriptcat.org/) 扩展（Chrome / Edge / Firefox）；
-2. 安装**两个**脚本：在 [ScriptCat 商店](https://scriptcat.org/zh-CN/script-show-page/9092) 点「安装」，或把 `微软bing rewards积分获取（持续优化版）.user.js` 与 `微软奖励控制台.user.js` 都导入脚本猫（拖入扩展或新建脚本粘贴全文）；
-3. 首次使用：打开任意 `cn.bing.com` 或 `rewards.bing.com` 页面 → 脚本猫菜单 →「🔑 手动授权」→ 登录微软账户完成 OAuth 授权；
-4. 之后由 crontab（`*/20 * * * *`）自动运行，无需人工干预；面板随时在 Bing/Rewards 页面通过菜单打开；
-5. 自动更新：两个脚本都已内置 `@updateURL`/`@downloadURL`，在脚本猫中开启「检查更新」后，新发布的 Release 会自动拉取升级（随附的 `script.options.json` 已默认开启）。
+2. 安装脚本：在 [ScriptCat 商店](https://scriptcat.org/zh-CN/script-show-page/9092) 点「安装」，或把 `微软bing rewards积分获取（持续优化版）.user.js` 导入脚本猫（拖入扩展或新建脚本粘贴全文）；
+3. 首次使用：脚本菜单 →「🔑 手动授权」→ 登录微软账户完成 OAuth 授权；
+4. 之后由 crontab（`*/20 * * * *`）自动运行，无需人工干预；
+5. 自动更新：脚本已内置 `@updateURL`/`@downloadURL`，在脚本猫中开启「检查更新」后，新发布的 Release 会自动拉取升级（随附的 `script.options.json` 已默认开启）。
 
 ## ⚙️ 配置说明
 
@@ -175,19 +74,18 @@ v1.8.0 曾尝试用 Rewards 桌面客户端身份（伪造 `MSRewards/Desktop` U
 | 登录回调捕获 | 在 `oauth20_desktop.srf` 截获 OAuth code，兑换并续期 access token |
 | RewardsAuto | UA / offerId / 搜索词池 / 跳过规则等常量与运行状态（含兜底的领取 action id） |
 | PushPlus | 推送配置读取与就绪判定（endpoint、token、开关） |
-| Utils | 缓存（TTL+单飞）、安全 UI 封装、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()`；v2.0 新增 `panelCss()` / `buildPanelModel()` / `showPanel()` 面板内核（Shadow DOM 隔离） |
+| Utils | 缓存（TTL+单飞）、安全 UI 封装、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()` |
 | API 层 | token 生命周期、**dashboard 服务端渲染解析**（余额/等级/连签/待领取）、DAPI 511 字段适配、阅读与卡片（Server Action 动态解析）、搜索（热词 + 配额）、区域检查 |
 | 自动领取 | 两跳定位懒加载 chunk 里的 `reportClaimAllPoints` action id → `POST /dashboard`（`Next-Action` 头 + `[]`）→ 余额复核 |
-| TaskManager | 运行锁、完成调度、六项任务执行（阅读 / 签到 / 活动卡片 / 搜索 / 连签检测 / 每日活动 + 待领取）、报表汇总、收尾推送 |
-| 菜单系统 | 定时脚本侧七个菜单写成 `Config.openPanel` 标记并打开 Rewards 页；真实面板在控制台脚本里渲染 |
-| init | crontab 注册；消费 `Config.runRequest` 优先跑一轮；登录回调码兜底兑换 |
+| TaskManager | 运行锁、完成调度、七项任务执行、报表汇总、收尾推送 |
+| 菜单系统 | 授权 / 兑换 / 状态 / 立即运行 / 推送配置 / 测试通知 / 调试导出 |
+| init | crontab 注册；Bing 搜索页跳过初始化；登录回调页立即兑换 token |
 
 ## 🗂️ 文件结构
 
 ```
 scriptcat-ms-rewards/
-├── 微软bing rewards积分获取（持续优化版）.user.js   # 定时脚本：后台自动化（service_worker）
-├── 微软奖励控制台.user.js                # 页面脚本：七个菜单面板（rewards.bing.com 等）
+├── 微软bing rewards积分获取（持续优化版）.user.js   # 主脚本（直接导入脚本猫）
 ├── script.options.json                 # 脚本猫选项元数据（含 @connect 声明）
 ├── script.storage.json                 # 存储快照示例（令牌已脱敏置空）
 ├── 主页实测与改进清单.md                # 2026-11 新版站点实测证据与 16 项改进清单
@@ -202,101 +100,6 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
-
-### v2.2.0（拆成定时脚本 + 控制台脚本，面板第一次真正跑起来）
-
-**1. 定位到 v2.1「菜单点了没反应」的根因**
-
-ScriptCat `runtime.ts` 的 `getParticularScriptList()` 只注册 `type === NORMAL` 的脚本；带 `@crontab` 的脚本类型是 `CRONTAB`，**永远不会注入网页**。而面板首行 `if (typeof document === "undefined") return null;` 在 `service_worker` 里恒成立 → 六个菜单项全部落空。真机日志佐证：6 小时 139 条日志中 `service_worker` 131 条、`sandbox` 8 条且均为空 `exec script complete`，页面侧从未执行。
-
-**2. 新增 `微软奖励控制台.user.js`（页面脚本）**
-
-- `@match` 覆盖 `rewards.bing.com` / `www.bing.com` / `cn.bing.com` / OAuth 回调页，**无 `@crontab`**，确保 `type=NORMAL` 才会被注入；
-- 内核方法从原脚本**精确切片**搬入（`panelCss` / `buildPanelModel` / `showPanel` / `log` / `debug` / `copyText` / `notifyError` / `sendPushPlus` / `xhr` / `extractAuthCode` 等 20 个 + `getToken` / `renewToken` / `hasUsableToken` / `_renewToken` 4 个），不是重写；
-- 七个面板：手动授权、兑换授权码、运行状态、立即运行、PushPlus、诊断信息、通知设置；
-- 授权回调页自成闭环：捕获 `code` → `handleConfigCode` → 兑换 → 成功弹面板并提示可关闭页面；
-- 调试入口：`unsafeWindow.__MSREWARDS__`（`open(key)` / `keys` / `readSnapshot`），必须挂 `unsafeWindow` 主世界才可见。
-
-**3. 定时脚本瘦身（297,781 B / 5,340 行 → 222,997 B / 3,989 行）**
-
-删除：六个菜单整块、`showDebugInfo`、`exportDiagnostics`、`buildDebugText`、`pendingDebugView` 跨上下文回显块、`isLoginCallback` 头尾两段、`isBingSearchPage` 分支、`@tips`；随之归零的 `showPanel` / `panelCss` / `buildPanelModel` / `copyText` / `safeAlert` / `safePrompt` / `safeConfirm` / `safeReload` / `sendTestNotification` / `runNow` / `updateBroMenu` 一并删除。
-
-新增：`openConsolePanel(key, label)` 七个菜单（写 `Config.openPanel` + `GM_openInTab`）、`runAll` 末尾写快照（`lastStats` / `lastRunTs` / `lastDebugInfo` / `lastDebugInfoAt`）、`init()` 消费 `Config.runRequest`。
-
-**4. 修掉控制台脚本一处 CSS 截断**
-
-`panelCss` 切片时 `.ft{display:flex` 少了后半截（无 `padding` / `border-top` / `background` / `flex:0 0 auto`），导致状态面板底栏按钮浮在内容之上、被折叠区盖住。补齐后实测 `.ft` 高度 57px、`border-top 1px`、`padding-top 10px`、`flex: 0 0 auto`。
-
-**5. 版本与验证**
-
-- 双脚本版本号统一 2.2.0（定时脚本 `@version` + `engineVersion`；控制台 `@version`）；
-- `node --check` 双脚本均通过；CRLF 保持（定时脚本 3,989 行全 CRLF，控制台 1,721 行全 CRLF）；
-- 真机（脚本猫 1.5.2 + Edge）：控制台脚本注入 `cn.bing.com` 与 `login.live.com` 均成功，七个面板全部打开，状态面板显示定时脚本快照的真实数据（今日得分 +127 / 任务完成 6/10 / 余额 17,961 / 连续签到 4 天）。
-
-### v2.1.0（菜单项全部改为面板 + 面板获得表单能力）
-
-**1. 六个菜单项改为面板**
-
-| 菜单项 | 之前 | 现在 |
-| --- | --- | --- |
-| 🔑 手动授权 | 直接开标签页，没有任何说明 | 面板：四步流程 + 授权链接可复制 + 「打开授权页面 / 复制链接」 |
-| 📋 粘贴/兑换授权码 | `prompt` 粘贴 → `alert` 结果 | 面板：多行输入框 + 「兑换」（异步，结果回写提示条）+「清空输入」 |
-| 🚀 立即运行 | 点完立刻开跑，无确认 | 面板：本轮五步说明 + 「开始运行」 |
-| 🔔 PushPlus 推送 | `prompt` 选 `1/2/3/9/0`，选项写在说明里 | 面板：开关 + Token 密码框 + 动态摘要 + 「保存 / 发送测试 / 清空 Token」 |
-| 🔧 诊断信息 | `prompt` 选 `1/2/0` | 面板：「查看调试信息」「导出诊断 JSON」 |
-| 🔕 通知开关 | 点一下直接反转并刷新页面 | 面板：开关 + 「保存并刷新」 |
-
-每个入口都保留 `if (!panel)` 分支，后台上下文拿不到 DOM 时仍按旧逻辑执行——换界面不牺牲「后台也能用」。
-
-**2. `Utils.showPanel` 新增表单能力**
-
-- 新增 `opts.fields`，支持 `checkbox` / `text` / `password` / `textarea` 四种字段，字段可带 `label`、`placeholder`、`hint`、`rows`
-- 按钮回调签名扩展为 `onClick(area, close, api)`，`api` 提供 `values()`、`setValue(key, value)`、`focusField(key)`、`setNote(text)`、`setFields(fields)`、`close()`
-- 返回句柄新增 `setNote(text)`、`setFields(fields)`
-- 提示条改为常驻 DOM（`hidden` 切换）而不是空值直接 `display:none`，因此 `setNote()` 可以「先隐藏、后重新显示」；回调抛错会被统一写进提示条，异步回调的 rejection 也不会变成未处理拒绝
-- 字段区固定排在滚动区最前面（表单面板里表单是主体，任务行退居其次），并保证 `setRows` 二次调用不会把任务行顶到字段上方
-
-**3. 顺手修掉的两个真问题**
-
-- `setStats()` 异步回填时用 `body.prepend(statsEl)`，会把指标条塞进滚动区——滚动任务行时数值跟着滚走。改为挂在 `card` 内、`body` 之前，指标条常驻可见
-- 面板首次渲染时 `.stats` 是 `card` 直接子节点、但 `setStats` 又用另一条路径插入，两条路径不一致；现在统一为「不在 DOM 才插，且插在 `body` 前」
-
-**4. 版本与体积**
-
-- `@version` 与 `engineVersion` 双升 `2.1.0`；业务判定与重置逻辑未变
-- `@description` 补上「六个菜单项都改成可视化面板」
-- 脚本 5,065 行 / 282,752 B → **5,340 行 / 297,781 B**（+275 行 / +15,029 B，含面板表单内核与六个入口的面板代码）
-
-### v2.0.0（控制台面板重做 + 移除桌面周任务）
-
-这一版两条主线：**界面**全部重做，**功能**收敛掉一条验证失败的通道。
-
-#### 1. 暗色控制台面板（新增）
-
-| 方法 | 职责 |
-| --- | --- |
-| `Utils.panelCss()` | 返回整段面板 CSS，注入 Shadow DOM；`:host` 上定义 `--pc-bg / --pc-surface / --pc-fg / --pc-muted / --pc-border / --pc-accent` 等变量，宿主页样式无法污染面板 |
-| `Utils.buildPanelModel(stats, extra)` | 把 `API.getServerStats()` 的结果转成「4 项指标 + 9 行任务队列」，`statusOf()` 统一输出 `ok / run / wait / skip / fail` 五态 |
-| `Utils.showPanel(opts)` | 面板外壳：overlay + 卡片 + 头部 + 指标条 + 任务行 + 日志区 + 可折叠原文 + 底部按钮；Esc 与点遮罩关闭；返回 `{setText, setRows, setStats, appendLog, close}` 句柄 |
-
-- 样式隔离用 `new CSSStyleSheet()` + `adoptedStyleSheets`，不支持时回退 `<style>`；**不新增 `@grant`**（没有 `GM_addStyle` 也能用）
-- 四个入口全部接上：📊 运行状态、🔧 调试信息、🧪 诊断数据、跨上下文回显
-- 运行状态面板先秒开显示骨架，`API.getServerStats()` 回来后异步填充指标，不阻塞菜单
-- 调试面板把原来的 `Utils.safeAlert(note)` 打断改为面板顶部提示条；诊断面板按 `report.endpoints` 生成 ✓/✕ 覆盖行
-- 补了细滚动条、`:focus-visible` 描边、`prefers-reduced-motion` 关动画、420px 以下转 2 列指标
-
-#### 2. 移除桌面应用周任务（整段删除）
-
-- 删除 `doDesktopWeeklyQuests()`（约 11.7 KB）、`RewardsAuto.desktopAppHeaders`、`Tasks.desktop` 配置项、`kindText.desktop_app`、`claimCard` 里的桌面头分支、日报的「🗓️ 周任务」字段、`TaskManager` 的 4 个 desktop 计数
-- 失败原因见上文「🆕 v2.0 变更与已知限制」：**子项搜索上报成功、交卷长期 HTTP 500，根因是服务端 Origin 白名单 + 浏览器不允许自定义 `Origin`**
-
-#### 3. 其它清理
-
-- 删除零引用的 `Utils.showTextPanel`（旧面板 API，三个调用点早已迁到 `showPanel`）
-- `@description` 去掉周任务措辞、补上 v2.0 面板卖点
-- `@version` 与 `engineVersion` 均升到 `2.0.0`；重置逻辑不变（只清当日尝试计数，不含「已完成」标记），重复执行无副作用
-- 脚本行数 5,319 → **5,065 行**；体积 298,766 B → **282,752 B**（相比「加完面板但周任务还在」的中间态 **−16,014 B / −254 行**）
-- 相对 v1.8.6 发布版（273,166 B / 4,858 行）净增 **+9,586 B / +207 行**——增量来自新面板内核（实测 21,057 B：`panelCss` 6,541 + `buildPanelModel` 4,596 + `showPanel` 9,920），周任务与旧面板的删除量抵掉了一部分
 
 ### v1.8.6（代码整理：删死代码 + 合并重复实现）
 
@@ -355,13 +158,11 @@ ScriptCat `runtime.ts` 的 `getParticularScriptList()` 只注册 `type === NORMA
 
 ### v1.8.0（每天必跑 + 桌面周任务 + 需人工分类 + 通知节流）
 
-> ⚠️ 本节中的「桌面应用周任务」已在 v2.0 整段移除（交卷长期 HTTP 500，根因是服务端 Origin 白名单），保留此记录仅作历史追溯。
-
 - ❌ **彻底删除「连续 3 天全部完成后次日跳过」的跨日调度**（`readCompletionSchedule` / `isWaitingForNextDay` / `recordCompletion` 三个方法与全部调用点）。脚本现在**每天都会运行**，只要当天还有未完成项就继续补做；唯一的跳过是同轮并发保护（运行锁）
-- ✅ 新增**桌面应用周任务** `doDesktopWeeklyQuests()`：用 MSRewards 桌面客户端身份（UA + `X-MSRewards-App`）访问 `/earn`，定位 `WW_pcparent_RewardsApp_weekly` 周卡，解析 `pcchild` 子项，应用内搜索走 `rewardsapp/reportActivity`，交卷走 Server Action（`reportActivity`），最后回读复核（**v2.0 已移除**）
+- ✅ 新增**桌面应用周任务** `doDesktopWeeklyQuests()`：用 MSRewards 桌面客户端身份（UA + `X-MSRewards-App`）访问 `/earn`，定位 `WW_pcparent_RewardsApp_weekly` 周卡，解析 `pcchild` 子项，应用内搜索走 `rewardsapp/reportActivity`，交卷走 Server Action（`reportActivity`），最后回读复核
 - ✅ 新增**卡片原因分类** `_cardBlockReason()`：Quiz 卡（需落地页点答案）、`VerB_Locked_level` 带锁拼图（+10 只能真拼）、`form=ML2W4J/ML2Y2H` 应用内搜索卡、等级不足卡，命中即跳过并计入「需人工」，不再反复重试污染失败计数
 - ✅ 新增**通知分层节流**：同一异常 key 6 小时内只推一次，全局每小时最多 3 条，超限只写日志；日报/完成通知不受影响
-- ✅ 日报新增「🗓️ 周任务 x/y」（**v2.0 已移除**）与「需人工 N」两项
+- ✅ 日报新增「🗓️ 周任务 x/y」与「需人工 N」两项
 - 📄 新增「开源致谢」注释块与 README 感谢名单
 
 ### v1.7.0（更名 + 参考脚本对照结论）
