@@ -2,7 +2,7 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.8.3 · License：MIT
+> 版本：v1.8.4 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 > v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
 
@@ -100,6 +100,16 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v1.8.4（应用内搜索上报对齐真实页面协议）
+
+- 🧭 **直接使用卡片原始地址**：应用卡改为导航到 `destination` 的完整地址（只把 `www.bing.com` 换成当前生效的 host），不再自己拼 `?q=&form=`，站点附加的追踪参数一个不丢
+- 🔢 **IID 取自页面**：真实页面调 `sj_rra` 用的是 `window.data_iid`（如 `SERP.5057`），脚本此前硬编码 `SERP.5047`；现在新增 `Utils.extractIID()` 从搜索页 HTML 的 `data_iid="SERP.xxxx"` 读取，取不到才回退
+- 🧾 **上报参数对齐**：`reportActivity` 的查询串改用目标地址的原始 `location.search`，body 里的 `url` 改成和真实 `escape()` 一致的编码（`/` 不转义），不再用 `encodeURIComponent` 整体重排
+- 📱 **保留移动端回执日志**：`上报回执: IsAuthenticated=… RewardsIncrement=…` 仍每张卡打一行，用于判断是否真正记账
+- 🧩 版本升级重置当日尝试态，当天被旧逻辑标记过的卡会再试一次
+
+> 已知边界：这条链路今天已验证「上报会被受理（`IsAuthenticated=true` / `RewardsIncrement=1`）但不一定记账」；v1.8.4 是对齐真实页面协议的一次尝试，能否到账需次日跑一轮才能确认。
 
 ### v1.8.3（手机端搜索适配 + 手机配额补跑）
 

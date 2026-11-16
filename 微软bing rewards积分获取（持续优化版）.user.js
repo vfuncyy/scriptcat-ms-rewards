@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.3
+// @version      1.8.4
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -764,6 +764,22 @@ Notice:
                 if (m) return String(m[1]).toUpperCase();
             }
             return "";
+        },
+
+        /**
+         * 从搜索页 HTML 中提取本次 SERP 的 IID（形如 SERP.5057）
+         * 说明：真实页面调 sj_rra 上报时用的是 window.data_iid，而不是硬编码的 SERP.5047；
+         *      登录态下取回的搜索页 HTML 里带有 data_iid="SERP.xxxx"，必须用它。
+         * @param {string} html 搜索页 HTML
+         * @returns {string} IID；取不到时回退 SERP.5047
+         */
+        extractIID(html) {
+            const text = String(html || "");
+            if (text) {
+                const m = text.match(/data_iid\s*=\s*["']([^"']+)["']/i);
+                if (m) return m[1];
+            }
+            return "SERP.5047";
         },
 
         randomRange(min, max) {
@@ -2519,13 +2535,23 @@ Notice:
                         // 卡片 destination 不带搜索词时，用卡片标题当搜索词（服务端只校验"发生了应用内搜索"）
                         query = String(card.title || "Microsoft Rewards").replace(/[+＋]\s*\d+\s*积分?/g, "").trim() || "Microsoft Rewards";
                     }
+                    // 还原真实页面行为：导航到卡片 destination 的完整地址（保留全部查询串），
+                    // 锁区时把域名换成当前生效的 host，避免 www.bing.com 302 掉参数
+                    let rawUrl = "";
+                    try {
+                        const u2 = new URL(dest);
+                        u2.protocol = "https:";
+                        u2.host = RewardsAuto.state.host;
+                        if (!u2.searchParams.get("q") && !u2.searchParams.get("query")) u2.searchParams.set("q", query);
+                        rawUrl = u2.toString();
+                    } catch (_) { rawUrl = ""; }
                     Utils.log("📱", `「${card.title || card.offerId}」按移动端身份搜索：${query}（form=${form}）`);
-                    const html = await API.getSearchPage(query, true, form);
+                    const html = await API.getSearchPage(query, true, form, rawUrl);
                     const pageOk = /b_results|b_algo/i.test(String(html || ""));
                     if (!pageOk) {
                         Utils.log("🟡", `移动端搜索页无结果结构，跳过该卡：${card.title || card.offerId}`);
                     } else {
-                        const accepted = await API.reportSearch(html, query, true, form);
+                        const accepted = await API.reportSearch(html, query, true, form, rawUrl);
                         if (accepted) return await this.settleCard(card, "移动端搜索上报", startedAt);
                         Utils.log("🟡", `移动端搜索上报未被受理：${card.title || card.offerId}`);
                     }
@@ -2707,15 +2733,18 @@ Notice:
          * @param {string} form Bing 的 form 参数（默认 QBLH；应用卡传 ML2W4J / ML2Y2H）
          * @returns {Promise<string>} 页面 HTML
          */
-        async getSearchPage(query, isMobile = false, form = "") {
+        async getSearchPage(query, isMobile = false, form = "", rawUrl = "") {
             const mkt = GM_getValue("Config.lock", true) ? "&mkt=zh-CN" : "";
             const formParam = String(form || "QBLH");
             const rawCookie = await Utils.getCookieString(`https://${RewardsAuto.state.host}/`);
             // 注入浏览器真实会话 Cookie，避免后台请求被视为未登录而不计分；
             // 移动端再追加 _Rwho=u=m，让服务端把这次搜索算到手机端
             const cookie = Utils.cookieWithRwho(rawCookie, isMobile ? "m" : "d");
+            // rawUrl：卡片 destination 的原始搜索地址（带完整查询串），
+            // 真实页面就是导航到这个地址后自己调 sj_rra 上报的，参数一个都不能丢
+            const pageUrl = rawUrl || `https://${RewardsAuto.state.host}/search?q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`;
             const html = await Utils.xhr({
-                url: `https://${RewardsAuto.state.host}/search?q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`,
+                url: pageUrl,
                 headers: {
                     "user-agent": isMobile ? RewardsAuto.ua.mobile : RewardsAuto.ua.pc,
                     "referer": `https://${RewardsAuto.state.host}/?form=${encodeURIComponent(formParam)}`,
@@ -2723,7 +2752,7 @@ Notice:
                 }
             });
             const text = typeof html === "string" ? html : "";
-            Utils.debug("search-page", `${isMobile ? "移动端" : "PC"} form=${formParam} len=${text.length} IG=${Utils.extractIG(text) || "无"} 结果=${/b_results|b_algo/i.test(text)}`);
+            Utils.debug("search-page", `${isMobile ? "移动端" : "PC"} form=${formParam} len=${text.length} IID=${Utils.extractIID(text)} IG=${Utils.extractIG(text) || "无"} 结果=${/b_results|b_algo/i.test(text)}`);
             return html;
         },
 
@@ -2735,13 +2764,22 @@ Notice:
          * @param {string} form Bing 的 form 参数（默认 QBLH）
          * @returns {Promise<boolean>} 是否被服务端受理（未登录返回 false）
          */
-        async reportSearch(html, query, isMobile = false, form = "") {
+        async reportSearch(html, query, isMobile = false, form = "", rawUrl = "") {
             try {
                 // IG 优先取自搜索页（随机 UUID 不会挂到当前会话上，计数不涨）
                 const ig = Utils.extractIG(html) || Utils.getRandomUUID();
+                // IID 必须用页面自己的（真实 sj_rra 用的是 window.data_iid，如 SERP.5057），
+                // 硬编码 SERP.5047 会让这次上报挂到别的页面模块上
+                const iid = Utils.extractIID(html);
                 const mkt = GM_getValue("Config.lock", true) ? "&mkt=zh-CN" : "";
                 const formParam = String(form || "QBLH");
-                const params = `q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`;
+                const pageUrl = rawUrl || `https://${RewardsAuto.state.host}/search?q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`;
+                // 查询串照搬真实页面：sj_rra 取的是 location.search 原文（含 q / form 以及站点附加参数）
+                let params = `q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`;
+                try {
+                    const qs = new URL(pageUrl).search.replace(/^\?/, "");
+                    if (qs) params = qs;
+                } catch (_) { /* 地址不合法时保留默认查询串 */ }
                 const rawCookie = await Utils.getCookieString(`https://${RewardsAuto.state.host}/`);
                 // 注入浏览器真实会话 Cookie，确保上报请求被识别为已登录
                 const cookie = Utils.cookieWithRwho(rawCookie, isMobile ? "m" : "d");
@@ -2753,17 +2791,26 @@ Notice:
                 };
                 const headerRes = await Utils.xhr({
                     method: "POST",
-                    url: `https://${RewardsAuto.state.host}/rewardsapp/ncheader?ver=88888888&IID=SERP.5047&IG=${ig}&ajaxreq=1`,
+                    url: `https://${RewardsAuto.state.host}/rewardsapp/ncheader?ver=88888888&IID=${encodeURIComponent(iid)}&IG=${ig}&ajaxreq=1`,
                     headers, data: "wb=1%3bi%3d1%3bv%3d1"
                 });
                 Utils.debug("search-header", `响应: ${String(headerRes).slice(0, 400)}`);
+                // 真实 sj_rra 的 body 用 escape() 编码：escape 只放过 @*_+-./ ，冒号仍转成 %3A，
+                // 反斜杠前的 "/" 不转义，这里按同样形态拼，避免服务端校验不一致
+                const escapedPageUrl = encodeURIComponent(pageUrl).replace(/%2F/gi, "/");
                 const actRes = await Utils.xhr({
                     method: "POST",
-                    url: `https://${RewardsAuto.state.host}/rewardsapp/reportActivity?IG=${ig}&IID=SERP.5047&${params}&ajaxreq=1`,
+                    url: `https://${RewardsAuto.state.host}/rewardsapp/reportActivity?IG=${ig}&IID=${encodeURIComponent(iid)}&${params}&ajaxreq=1`,
                     headers,
-                    data: `url=${encodeURIComponent(`https://${RewardsAuto.state.host}/search?${params}`)}&V=web`
+                    data: `url=${escapedPageUrl}&V=web`
                 });
                 Utils.debug("search-report", `响应: ${String(actRes).slice(0, 800)}`);
+                // 移动端上报单独留一行回执：这两张卡是否记账只能靠服务端这两个字段判断
+                if (isMobile) {
+                    const authM = String(actRes).match(/IsAuthenticated"?\s*:\s*(true|false)/i);
+                    const incM = String(actRes).match(/RewardsIncrement"?\s*:\s*(\d+)/i);
+                    Utils.log("📱", `上报回执: IsAuthenticated=${authM ? authM[1] : "无"} RewardsIncrement=${incM ? incM[1] : "无"}`);
+                }
                 // 未登录时接口返回页面模块并带 IsAuthenticated:false，此时搜索不会计分
                 if (/IsAuthenticated"?\s*:\s*false/i.test(String(actRes))) {
                     // 这里才是真正的会话未登录：搜索不会计分，后续阅读任务也应跳过
@@ -3047,7 +3094,9 @@ Notice:
             // v1.6.0 更换了数据源（dashboard RSC + DAPI 字段适配），升级时重置一次当日尝试状态
             // v1.8.2 调整了活动卡片/每日活动的尝试计数语义，升版时再重置一次旧尝试态
             // v1.8.3 放开了 App 内搜索卡拦截，升版时重置一次，让此前被跳过的卡当天就能重试
-            const engineVersion = "1.8.3";
+            // v1.8.4 补齐了应用内搜索上报的参数（原始 destination + 页面 IID + escape 编码的 url），
+            //        同样重置一次，让当天被旧逻辑标记过的卡再试一遍
+            const engineVersion = "1.8.4";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
