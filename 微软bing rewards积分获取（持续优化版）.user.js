@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.4
+// @version      1.8.5
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -665,12 +665,38 @@ Notice:
                                 this.xhr({ ...options, _attempt: attempt + 1 }).then(resolve, reject);
                             }, 1200 * (attempt + 1));
                         } else {
-                            reject(new Error(`HTTP ${res.status}，用时 ${cost} 秒`));
+                            // v1.8.5：把服务端响应体一并带出，否则 4xx/5xx 只能看到状态码，无法定位原因
+                            const body = String(res.responseText == null ? "" : res.responseText);
+                            const err = new Error(`HTTP ${res.status}，用时 ${cost} 秒`);
+                            err.status = res.status;
+                            err.body = body.slice(0, 400);
+                            err.bodyLen = body.length;
+                            reject(err);
                         }
                     },
                     onerror: (err) => {
                         const cost = ((Date.now() - start) / 1000).toFixed(2);
-                        reject(new Error(`${err?.error || "网络错误"}，用时 ${cost} 秒`));
+                        // v1.8.5：连接层失败原来只取 err.error（绝大多数情况就是 "Unknown Error"），
+                        // 这里把整个回调对象可读化，用来区分「被 WAF 掐断」「扩展拒绝」还是「真的断网」
+                        const detail = (() => {
+                            try {
+                                const o = err || {};
+                                return JSON.stringify({
+                                    error: o.error || "",
+                                    status: o.status === undefined ? null : o.status,
+                                    message: o.message || "",
+                                    readyState: o.readyState === undefined ? null : o.readyState,
+                                    bodyLen: String(o.responseText || "").length,
+                                    keys: Object.keys(o)
+                                }).slice(0, 300);
+                            } catch (_) {
+                                return "无法序列化";
+                            }
+                        })();
+                        const e2 = new Error(`${err?.error || "网络错误"}，用时 ${cost} 秒`);
+                        e2.network = true;
+                        e2.detail = detail;
+                        reject(e2);
                     },
                     ontimeout: () => {
                         const cost = ((Date.now() - start) / 1000).toFixed(2);
@@ -3096,7 +3122,9 @@ Notice:
             // v1.8.3 放开了 App 内搜索卡拦截，升版时重置一次，让此前被跳过的卡当天就能重试
             // v1.8.4 补齐了应用内搜索上报的参数（原始 destination + 页面 IID + escape 编码的 url），
             //        同样重置一次，让当天被旧逻辑标记过的卡再试一遍
-            const engineVersion = "1.8.4";
+            // v1.8.5 只做排障增强（保留服务端响应体 / 连接层详情 / 连续失败熔断），业务语义未变；
+            //        这里的重置只清「当日尝试计数」，不含「已完成」标记，重复执行无副作用
+            const engineVersion = "1.8.5";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -3419,8 +3447,16 @@ Notice:
                     Utils.log("✅", "桌面应用周任务：全部子项已完成");
                     continue;
                 }
-                for (const k of kids.filter((x) => !x.isCompleted && !x.isLocked)) {
+                // v1.8.5：连续交卷失败（尤其连接层被掐断）时不再硬撑后续子项，
+                // 先停一轮看回执，避免把 WAF 触发得更狠
+                let consecutiveFail = 0;
+                const pendingKids = kids.filter((x) => !x.isCompleted && !x.isLocked);
+                for (const k of pendingKids) {
                     if (!this.touchRunLock()) throw new Error("RUN_LOCK_LOST");
+                    if (consecutiveFail >= 2) {
+                        Utils.log("🟡", `周任务: 已连续 ${consecutiveFail} 项交卷失败，本轮提前停止（剩余 ${pendingKids.length - pendingKids.indexOf(k)} 项未尝试）`);
+                        break;
+                    }
                     Utils.log("🗓️", `周任务子项「${k.title}」开始处理`);
                     // 1) 先按子项类型触发一次真实动作（应用内搜索 / 打开落地页）
                     if (/bing\.com\/search/i.test(k.href || "")) {
@@ -3458,24 +3494,32 @@ Notice:
                         const accepted = /^\d+:true\s*$/m.test(String(res || ""));
                         Utils.debug("desktop-submit", `子项「${k.title}」回执原文: ${String(res || "")}`);
                         if (accepted) {
+                            consecutiveFail = 0;
                             this.desktopStats.ok += 1;
                             this.desktopDone += 1;
                             Utils.log("✅", `周任务子项「${k.title}」交卷受理`);
                         } else {
+                            consecutiveFail += 1;
                             this.desktopStats.fail += 1;
                             Utils.log("🟡", `周任务子项「${k.title}」未受理（回执 ${String(res || "").slice(0, 60) || "空"}）`);
                         }
                     } catch (e) {
+                        consecutiveFail += 1;
                         this.desktopStats.fail += 1;
                         // v1.8.2：HTTP 500 每轮只发一次告警，其余写调试缓冲（避免每天刷 6 条黄字）
-                        if (/HTTP\s+500/.test(e.message)) {
-                            Utils.debug("desktop-submit", `子项「${k.title}」交卷 500 详情: ${e.message}`);
+                        // v1.8.5：告警文案里带上服务端响应体/连接层详情，直接定位根因
+                        if (/^HTTP\s+500/.test(e.message)) {
+                            const bodyInfo = e.body ? `｜响应体(${e.bodyLen}B): ${e.body}` : "｜无响应体";
+                            Utils.debug("desktop-submit", `子项「${k.title}」交卷 500 详情: ${e.message}${bodyInfo}`);
                             if (!submit500Notified.value) {
                                 submit500Notified.value = true;
-                                Utils.log("🟡", "周任务交卷返回 HTTP 500（本轮子项仅此一次告警，逐项回执见调试日志）");
+                                Utils.log("🟡", `周任务交卷返回 HTTP 500（本轮仅此一次告警）${bodyInfo}`);
                             }
+                        } else if (e.network) {
+                            Utils.debug("desktop-submit", `子项「${k.title}」交卷连接失败详情: ${e.message} ${e.detail || ""}`);
+                            Utils.log("🟡", `周任务子项「${k.title}」交卷连接失败: ${e.message}｜${e.detail || "无详情"}`);
                         } else {
-                            Utils.log("🟡", `周任务子项「${k.title}」交卷失败: ${e.message}`);
+                            Utils.log("🟡", `周任务子项「${k.title}」交卷失败: ${e.message}${e.status ? `（状态 ${e.status}${e.body ? `｜响应体: ${e.body}` : ""}）` : ""}`);
                         }
                     }
                     await Utils.randomDelay(3000, 5000);
