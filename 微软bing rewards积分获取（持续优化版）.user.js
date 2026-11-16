@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.6
-// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
+// @version      2.0.0
+// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；v2.0 全新暗色控制台面板，把运行状态、调试信息、诊断数据统一成可视化界面；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
 // @crontab      */20 * * * *
@@ -103,11 +103,6 @@ Tasks:
         title: PC搜索
         type: checkbox
         default: true
-    desktop:
-        title: 桌面应用周任务（Rewards App 周卡）
-        type: checkbox
-        default: true
-        description: 用桌面客户端身份领取「WW_pcparent_RewardsApp_weekly」周任务子项，失败不影响其他任务
 Notice:
     bro:
         title: 浏览器通知（当前脚本）
@@ -150,11 +145,6 @@ Notice:
             pc: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
             mobile: "Mozilla/5.0 (Linux; Android 16; Redmi K20 Pro Build/BP4A.251205.006; ) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/144.0.7559.132 Mobile Safari/537.36 EdgA/131.0.0.0",
             app: "Mozilla/5.0 (Linux; Android 16; Redmi K20 Pro Build/BP4A.251205.006; ) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/144.0.7559.132 Mobile Safari/537.36 BingSapphire/32.6.2110003560",
-        },
-        desktopAppHeaders: {
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) MSRewards/Desktop/1.12.0.0",
-            "X-MSRewards-App": "1",
-            "X-Rewards-Source": "msrewards-desktop"
         },
         appConfig: {
             rewardsAppId: "SAAndroid/32.6.2110003560",
@@ -240,7 +230,6 @@ Notice:
             explore_search: "探索搜索",
             daily: "每日任务",
             streak: "连续打卡",
-            desktop_app: "桌面专享",
             open_only: "内容访问"
         },
         skipPatterns: [
@@ -460,63 +449,363 @@ Notice:
         },
 
         /**
-         * 在页面中展示只读文本面板（后台 service worker 无 DOM 时返回 null）
-         * @param {string} title 面板标题
-         * @param {string} text 面板初始文本
-         * @param {string} note 标题下方的状态提示（如复制成功/失败）
-         * @returns {{setText:Function,close:Function}|null} 面板控制句柄
+         * 面板样式表：整表作用于 Shadow DOM，杜绝宿主页样式污染；
+         * 颜色取设计系统三段式 token（primitive → semantic → component）的取值。
+         * @returns {string} CSS 文本
          */
-        showTextPanel(title, text, note = "") {
+        panelCss() {
+            return `
+:host{--pc-bg:#0F172A;--pc-surface:#1E293B;--pc-surface-2:#334155;--pc-fg:#F8FAFC;--pc-muted:#94A3B8;--pc-border:#475569;--pc-accent:#22C55E;--pc-danger:#EF4444;--pc-warn:#FBBF24;--pc-ring:#22C55E;--pc-sans:ui-sans-serif,system-ui,"Segoe UI","Microsoft YaHei",sans-serif;--pc-mono:ui-monospace,"Cascadia Code",Consolas,monospace;}
+*{box-sizing:border-box;}
+.wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(2,6,23,.62);font:13px/1.5 var(--pc-sans);color:var(--pc-fg);}
+.card{width:min(680px,94vw);max-height:86vh;display:flex;flex-direction:column;background:var(--pc-surface);border:1px solid var(--pc-border);border-radius:14px;box-shadow:0 18px 48px rgba(2,6,23,.55);overflow:hidden;animation:pc-in 220ms cubic-bezier(.2,.8,.2,1);}
+@keyframes pc-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.hd{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--pc-border);background:linear-gradient(180deg,rgba(51,65,85,.4),rgba(30,41,59,0));}
+.dot{width:8px;height:8px;border-radius:999px;background:var(--pc-accent);box-shadow:0 0 0 3px rgba(34,197,94,.16);flex:0 0 auto;}
+.title{font-weight:600;font-size:15px;letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.meta{margin-left:auto;font:11px/1.4 var(--pc-mono);color:var(--pc-muted);white-space:nowrap;}
+.x{width:24px;height:24px;padding:0;display:grid;place-items:center;font-size:14px;line-height:1;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--pc-muted);cursor:pointer;}
+.x:hover{background:var(--pc-surface-2);color:var(--pc-fg);}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--pc-border);}
+.stat{padding:10px 12px;border-left:1px solid var(--pc-border);min-width:0;}
+.stat:first-child{border-left:0;}
+.stat .k{font-size:11px;color:var(--pc-muted);letter-spacing:.02em;white-space:nowrap;}
+.stat .v{font:600 15px/1.3 var(--pc-mono);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stat .v small{font-weight:400;font-size:11px;color:var(--pc-muted);margin-left:2px;}
+.body{overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#3d4b61 transparent;}
+.body::-webkit-scrollbar,.log::-webkit-scrollbar,.rawbox textarea::-webkit-scrollbar{width:10px;height:10px;}
+.body::-webkit-scrollbar-track,.log::-webkit-scrollbar-track{background:transparent;}
+.body::-webkit-scrollbar-thumb,.log::-webkit-scrollbar-thumb,.rawbox textarea::-webkit-scrollbar-thumb{background:#3d4b61;border-radius:8px;border:2px solid transparent;background-clip:content-box;}
+.body::-webkit-scrollbar-thumb:hover,.log::-webkit-scrollbar-thumb:hover,.rawbox textarea::-webkit-scrollbar-thumb:hover{background:#4b5a72;background-clip:content-box;}
+.sec{display:flex;align-items:baseline;gap:8px;padding:10px 14px 2px;}
+.sec .h{font-size:11px;letter-spacing:.06em;color:var(--pc-muted);}
+.sec .n{margin-left:auto;font:11px/1 var(--pc-mono);color:var(--pc-muted);}
+.rows{list-style:none;margin:0;padding:0 8px 8px;}
+.row{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:center;gap:10px;padding:7px 6px;border-radius:6px;transition:background 150ms ease;}
+.row:hover{background:rgba(51,65,85,.45);}
+.row .ic{width:18px;height:18px;display:grid;place-items:center;font-size:11px;line-height:1;border-radius:999px;box-shadow:inset 0 0 0 1px currentColor;color:var(--pc-muted);}
+.row .nm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.row .st{font:11px/1 var(--pc-mono);color:var(--pc-muted);white-space:nowrap;}
+.row.is-ok .ic,.row.is-ok .st{color:var(--pc-accent);}
+.row.is-run .ic{color:var(--pc-warn);}
+.row.is-run .st{color:var(--pc-fg);}
+.row.is-fail .ic,.row.is-fail .st{color:var(--pc-danger);}
+.row.is-wait{opacity:.78;}
+.row.is-skip{opacity:.6;}
+.log{margin:0 14px 10px;padding:9px 11px;max-height:26vh;overflow:auto;font:11px/1.65 var(--pc-mono);color:var(--pc-muted);background:rgba(2,6,23,.42);border:1px solid var(--pc-border);border-radius:6px;white-space:pre-wrap;word-break:break-word;}
+.log:empty{display:none;}
+.rawbox{padding:0 14px 10px;}
+.rawbox>summary{cursor:pointer;font-size:12px;color:var(--pc-muted);padding:6px 0;user-select:none;list-style:none;}
+.rawbox>summary::-webkit-details-marker{display:none;}
+.rawbox>summary:hover{color:var(--pc-fg);}
+.rawbox>summary::before{content:"▸ ";color:var(--pc-muted);}
+.rawbox[open]>summary::before{content:"▾ ";}
+textarea{width:100%;height:32vh;resize:vertical;font:12px/1.6 var(--pc-mono);color:var(--pc-fg);background:rgba(2,6,23,.55);border:1px solid var(--pc-border);border-radius:6px;padding:8px;white-space:pre;tab-size:2;}
+.note{margin:10px 14px 0;padding:6px 9px;font-size:12px;color:var(--pc-fg);background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.28);border-radius:6px;word-break:break-word;}
+.ft{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--pc-border);background:rgba(15,23,42,.6);}
+button{font:inherit;font-size:13px;padding:7px 13px;border-radius:6px;border:1px solid var(--pc-border);background:var(--pc-surface-2);color:var(--pc-fg);cursor:pointer;transition:background 150ms ease,border-color 150ms ease,transform 80ms ease;white-space:nowrap;}
+button:hover{background:#3d4b61;}
+button:active{transform:translateY(1px);}
+button.primary{background:var(--pc-accent);border-color:var(--pc-accent);color:#0F172A;font-weight:600;}
+button.primary:hover{background:#2ee06a;border-color:#2ee06a;}
+button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outline:2px solid var(--pc-ring);outline-offset:2px;}
+.hint{margin-left:auto;font:11px/1.4 var(--pc-mono);color:var(--pc-muted);white-space:nowrap;}
+@media (prefers-reduced-motion:reduce){.card{animation:none;}button{transition:none;}}
+@media (max-width:420px){.card{width:100%;max-height:92vh;}.stats{grid-template-columns:repeat(2,1fr);}.stat:nth-child(3){border-left:0;}.hint{display:none;}}
+`;
+        },
+
+        /**
+         * 由服务端统计生成面板指标条与任务行（调试面板与「运行状态」菜单共用）
+         * @param {Object} stats API.getServerStats() 结果，可为 null
+         * @param {Object} [extra] 附加信息：{ tokenReady, claimable }
+         * @returns {{stats:Array<Object>,rows:Array<Object>}} 面板模型
+         */
+        buildPanelModel(stats, extra = {}) {
+            const s = stats || {};
+            const rows = [];
+            /**
+             * 追加一行任务状态
+             * @param {string} name 任务名
+             * @param {string} status ok|run|wait|skip|fail
+             * @param {string} note 右侧说明
+             */
+            const add = (name, status, note) => rows.push({ name, status, note: note || "" });
+            const known = (item) => Boolean(item && item.known);
+            const done = (item) => Boolean(item && item.done);
+            const filled = (item) => Boolean(item && item.known && item.max > 0 && item.progress >= item.max);
+            const fmt = (item) => {
+                if (!known(item)) return "—";
+                if (item.total !== undefined) return `${item.done}/${item.total}`;
+                return `${item.progress}/${item.max}`;
+            };
+            /**
+             * 百分比型任务转状态
+             * @param {Object} item 进度项
+             * @returns {string} 状态
+             */
+            const statusOf = (item) => {
+                if (!known(item)) return "wait";
+                if (filled(item)) return "ok";
+                return item.progress > 0 ? "run" : "wait";
+            };
+            const tokenReady = extra.tokenReady === undefined ? Boolean(RewardsAuto.state.token) : Boolean(extra.tokenReady);
+            add("授权 Token", tokenReady ? "ok" : "fail", tokenReady ? "已就绪" : "未获取，需重新授权");
+            add("PC 签到", done(s.signPC) ? "ok" : "wait", done(s.signPC) ? "已完成" : (known(s.signPC) ? "待完成" : "—"));
+            add("App 签到", done(s.signApp) ? "ok" : "wait", done(s.signApp) ? "已完成" : (known(s.signApp) ? "待完成" : "—"));
+            add("PC 搜索", statusOf(s.search), fmt(s.search));
+            add("新闻阅读", statusOf(s.read), fmt(s.read));
+            add("日常任务", statusOf(s.dailySet), fmt(s.dailySet));
+            add("任务卡", statusOf(s.punchcard), fmt(s.punchcard));
+            add("活动卡片", statusOf(s.evergreen), fmt(s.evergreen));
+            if (s.appBonus && s.appBonus.known && s.appBonus.total > 0) {
+                add("App 专属奖励", statusOf(s.appBonus), fmt(s.appBonus));
+            }
+            const claimable = extra.claimable === undefined ? (s.claimable || 0) : extra.claimable;
+            add("待领取积分", claimable > 0 ? "run" : "ok", claimable > 0 ? `+${claimable}` : "无");
+            const okCount = rows.filter(r => r.status === "ok").length;
+            const streak = s.checkin && s.checkin.known ? s.checkin.streak : null;
+            const hasStreak = streak !== null && streak !== undefined;
+            return {
+                stats: [
+                    { label: "今日得分", value: s.earnedToday === null || s.earnedToday === undefined ? "—" : `+${s.earnedToday}` },
+                    { label: "任务完成", value: `${okCount}/${rows.length}` },
+                    { label: "账户余额", value: s.balance === null || s.balance === undefined ? "—" : Number(s.balance).toLocaleString("zh-CN") },
+                    { label: "连续签到", value: hasStreak ? String(streak) : "—", unit: hasStreak ? "天" : undefined }
+                ],
+                rows
+            };
+        },
+
+        /**
+         * 在页面中展示控制面板（后台 service worker 无 DOM 时返回 null）
+         * @param {Object} [opts] 面板配置
+         * @param {string} [opts.title] 标题
+         * @param {string} [opts.meta] 标题右侧元信息
+         * @param {string} [opts.note] 顶部提示条（如复制结果）
+         * @param {Array<{label:string,value:string,unit?:string}>} [opts.stats] 指标条
+         * @param {Array<{name:string,status:string,note?:string}>} [opts.rows] 任务行
+         * @param {string} [opts.rowsTitle] 任务行分区标题
+         * @param {Array<string>|string} [opts.log] 日志行
+         * @param {string} [opts.logTitle] 日志分区标题
+         * @param {string} [opts.text] 原始文本（折叠区展示且可复制）
+         * @param {string} [opts.textTitle] 原始文本折叠标题
+         * @param {Array<{label:string,primary?:boolean,onClick:Function}>} [opts.actions] 底部按钮
+         * @param {string} [opts.hint] 底部右侧提示
+         * @returns {{setText:Function,setRows:Function,setStats:Function,appendLog:Function,close:Function}|null} 面板控制句柄
+         */
+        showPanel(opts = {}) {
             if (typeof document === "undefined") return null;
             const host = document.body || document.documentElement;
             if (!host) return null;
-            const overlay = document.createElement("div");
-            overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;";
-            const panel = document.createElement("div");
-            panel.style.cssText = "background:#fff;border-radius:10px;padding:14px;width:min(680px,94vw);max-height:86vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 12px 36px rgba(0,0,0,.3);font:13px/1.5 system-ui,sans-serif;";
-            const head = document.createElement("div");
-            head.textContent = title;
-            head.style.cssText = "font-weight:600;font-size:15px;";
-            const area = document.createElement("textarea");
-            area.value = text;
-            area.readOnly = true;
-            area.style.cssText = "width:100%;height:56vh;font:12px/1.5 Consolas,monospace;white-space:pre;border:1px solid #ddd;border-radius:6px;padding:8px;";
-            const bar = document.createElement("div");
-            bar.style.cssText = "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;";
-            /**
-             * 创建面板按钮
-             * @param {string} label 按钮文字
-             * @param {Function} onClick 点击回调
-             * @returns {HTMLButtonElement} 按钮元素
-             */
-            const makeBtn = (label, onClick) => {
-                const btn = document.createElement("button");
-                btn.textContent = label;
-                btn.style.cssText = "padding:6px 12px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7;cursor:pointer;font-size:13px;";
-                btn.onclick = onClick;
-                return btn;
-            };
-            if (note) {
-                const noteEl = document.createElement("div");
-                noteEl.textContent = note;
-                noteEl.style.cssText = "font-size:12px;color:#666;background:#f6f7f9;border-radius:6px;padding:6px 8px;";
-                panel.append(noteEl);
+            const hostEl = document.createElement("div");
+            hostEl.setAttribute("data-msrewards-panel", "1");
+            hostEl.style.cssText = "position:fixed;inset:0;z-index:2147483647;";
+            const root = hostEl.attachShadow ? hostEl.attachShadow({ mode: "open" }) : hostEl;
+            const css = Utils.panelCss();
+            try {
+                const sheet = new CSSStyleSheet();
+                sheet.replaceSync(css);
+                root.adoptedStyleSheets = [sheet];
+            } catch (_) {
+                const styleEl = document.createElement("style");
+                styleEl.textContent = css;
+                root.appendChild(styleEl);
             }
-            bar.append(
-                makeBtn("复制全部", () => {
-                    area.focus();
-                    area.select();
-                    if (Utils.copyText(area.value)) alert("已复制到剪贴板");
-                }),
-                makeBtn("关闭", () => overlay.remove())
-            );
-            panel.append(area, bar);
-            overlay.append(panel);
-            overlay.onclick = (ev) => { if (ev.target === overlay) overlay.remove(); };
-            host.append(overlay);
+            /**
+             * 创建元素并挂类名
+             * @param {string} tag 标签名
+             * @param {string} [cls] 类名
+             * @returns {HTMLElement} 元素
+             */
+            const el = (tag, cls) => {
+                const node = document.createElement(tag);
+                if (cls) node.className = cls;
+                return node;
+            };
+            const wrap = el("div", "wrap");
+            const card = el("div", "card");
+            card.setAttribute("role", "dialog");
+            card.setAttribute("aria-modal", "true");
+            card.setAttribute("aria-label", opts.title || "面板");
+            const hd = el("div", "hd");
+            hd.append(el("span", "dot"));
+            const titleEl = el("h2", "title");
+            titleEl.textContent = opts.title || "";
+            hd.append(titleEl);
+            if (opts.meta) {
+                const metaEl = el("span", "meta");
+                metaEl.textContent = opts.meta;
+                hd.append(metaEl);
+            }
+            const closeBtn = el("button", "x");
+            closeBtn.type = "button";
+            closeBtn.textContent = "✕";
+            closeBtn.setAttribute("aria-label", "关闭");
+            hd.append(closeBtn);
+            const body = el("div", "body");
+            const statsEl = el("div", "stats");
+            const noteEl = el("div", "note");
+            if (opts.note) {
+                noteEl.textContent = opts.note;
+                card.append(hd, noteEl, body);
+            } else {
+                noteEl.style.display = "none";
+                card.append(hd, body);
+            }
+            // 指标条
+            if (Array.isArray(opts.stats) && opts.stats.length) {
+                opts.stats.forEach((item) => {
+                    const box = el("div", "stat");
+                    const k = el("div", "k");
+                    k.textContent = item.label;
+                    const v = el("div", "v");
+                    v.textContent = item.value;
+                    if (item.unit) {
+                        const u = el("small");
+                        u.textContent = item.unit;
+                        v.append(u);
+                    }
+                    box.append(k, v);
+                    statsEl.append(box);
+                });
+                // 指标条挂在滚动区之外：滚动任务行时数值始终可见
+                if (card.contains(body) && !statsEl.isConnected) card.insertBefore(statsEl, body);
+            }
+            // 任务行
+            const rowsWrap = el("div");
+            const rowsSec = el("div", "sec");
+            const rowsTitle = el("span", "h");
+            rowsTitle.textContent = opts.rowsTitle || "任务队列";
+            const rowsCount = el("span", "n");
+            rowsSec.append(rowsTitle, rowsCount);
+            const rowsList = el("ul", "rows");
+            rowsWrap.append(rowsSec, rowsList);
+            /**
+             * 渲染任务行
+             * @param {Array<Object>} rows 任务行数据
+             */
+            const renderRows = (rows) => {
+                rowsList.textContent = "";
+                const list = Array.isArray(rows) ? rows : [];
+                const glyph = { ok: "✓", run: "◐", wait: "·", skip: "–", fail: "!" };
+                list.forEach((row) => {
+                    const li = el("li", `row is-${row.status || "wait"}`);
+                    const ic = el("span", "ic");
+                    ic.textContent = glyph[row.status] || glyph.wait;
+                    ic.setAttribute("aria-hidden", "true");
+                    const nm = el("span", "nm");
+                    nm.textContent = row.name || "";
+                    nm.title = row.name || "";
+                    const st = el("span", "st");
+                    st.textContent = row.note || "";
+                    li.append(ic, nm, st);
+                    rowsList.append(li);
+                });
+                const okCount = list.filter(r => r.status === "ok").length;
+                rowsCount.textContent = `${okCount} / ${list.length}`;
+                // 只在首次渲染时挂载到 body 顶部；重复 setRows 不再移动节点
+                if (list.length && !rowsWrap.isConnected) {
+                    body.insertBefore(rowsWrap, body.firstChild);
+                }
+                if (!list.length) rowsWrap.remove();
+            };
+            if (Array.isArray(opts.rows)) renderRows(opts.rows);
+            else rowsWrap.remove();
+            // 日志
+            const logEl = el("pre", "log");
+            /**
+             * 渲染日志文本
+             * @param {Array<string>|string} log 日志
+             */
+            const renderLog = (log) => {
+                const lines = Array.isArray(log) ? log : String(log || "").split("\n");
+                logEl.textContent = lines.filter(Boolean).join("\n");
+            };
+            if (opts.log) {
+                const logSec = el("div", "sec");
+                const logTitle = el("span", "h");
+                logTitle.textContent = opts.logTitle || "运行日志";
+                logSec.append(logTitle);
+                body.append(logSec, logEl);
+                renderLog(opts.log);
+            }
+            // 原始文本（折叠）
+            const area = document.createElement("textarea");
+            area.readOnly = true;
+            let rawBox = null;
+            if (opts.text !== undefined && opts.text !== null) {
+                rawBox = el("details", "rawbox");
+                const summary = el("summary");
+                summary.textContent = opts.textTitle || "原始文本";
+                area.value = String(opts.text);
+                rawBox.append(summary, area);
+                body.append(rawBox);
+            }
+            // 底栏
+            const ft = el("div", "ft");
+            const actions = Array.isArray(opts.actions) ? opts.actions : [];
+            actions.forEach((action) => {
+                const btn = el("button", action.primary ? "primary" : "");
+                btn.type = "button";
+                btn.textContent = action.label;
+                btn.onclick = () => { if (action.onClick) action.onClick(area, close); else close(); };
+                ft.append(btn);
+            });
+            const hint = el("span", "hint");
+            hint.textContent = opts.hint || "Esc 关闭";
+            ft.append(hint);
+            card.append(ft);
+            wrap.append(card);
+            root.appendChild(wrap);
+            /**
+             * 关闭并清理面板
+             */
+            const close = () => {
+                try { document.removeEventListener("keydown", onKey, true); } catch (_) {}
+                try { hostEl.remove(); } catch (_) {}
+            };
+            /**
+             * Esc 关闭
+             * @param {KeyboardEvent} ev 键盘事件
+             */
+            const onKey = (ev) => {
+                if (ev.key === "Escape") {
+                    ev.stopPropagation();
+                    close();
+                }
+            };
+            closeBtn.onclick = close;
+            wrap.onclick = (ev) => { if (ev.target === wrap) close(); };
+            try { document.addEventListener("keydown", onKey, true); } catch (_) {}
+            host.append(hostEl);
             return {
-                setText: (next) => { area.value = next; },
-                close: () => overlay.remove()
+                setText: (next) => { area.value = String(next === undefined || next === null ? "" : next); },
+                setRows: (rows) => { renderRows(rows); },
+                setStats: (stats) => {
+                    statsEl.textContent = "";
+                    (Array.isArray(stats) ? stats : []).forEach((item) => {
+                        const box = el("div", "stat");
+                        const k = el("div", "k");
+                        k.textContent = item.label;
+                        const v = el("div", "v");
+                        v.textContent = item.value;
+                        if (item.unit) {
+                            const u = el("small");
+                            u.textContent = item.unit;
+                            v.append(u);
+                        }
+                        box.append(k, v);
+                        statsEl.append(box);
+                    });
+                    if (!statsEl.parentNode) body.prepend(statsEl);
+                },
+                appendLog: (line) => {
+                    const text = logEl.textContent ? `${logEl.textContent}\n${line}` : String(line);
+                    logEl.textContent = text;
+                    logEl.scrollTop = logEl.scrollHeight;
+                },
+                close
             };
         },
 
@@ -2212,10 +2501,9 @@ Notice:
                         if (TaskManager.runId && !TaskManager.touchRunLock()) throw new Error("RUN_LOCK_LOST");
                         try {
                             const questUrl = `https://rewards.bing.com/earn/quest/${questId}`;
-                            const isDesktop = /RewardsApp_weekly_Exclusive/i.test(questId);
                             const questHtml = await Utils.xhr({
                                 url: questUrl,
-                                headers: isDesktop ? RewardsAuto.desktopAppHeaders : { "user-agent": RewardsAuto.ua.pc, "referer": "https://rewards.bing.com/earn" }
+                                headers: { "user-agent": RewardsAuto.ua.pc, "referer": "https://rewards.bing.com/earn" }
                             });
                             await Utils.randomDelay(150, 350);
                             if (!questHtml) continue;
@@ -2236,14 +2524,13 @@ Notice:
                                     if (qItem.isLocked === true || qItem.isCompleted === true) continue;
                                     // 多日搜索类子任务需真实搜索，跳过
                                     if (/search/i.test(qItem.offerId) && /(day|streak|\dx)/i.test(qItem.offerId)) continue;
-                                    const isDesktopChild = /pcchild|RewardsApp/i.test(qItem.offerId);
                                     Utils.log("🧩", `发现任务卡子项: ${qItem.title || qItem.offerId}`);
                                     pushCard({
-                                        title: `${isDesktopChild ? "[桌面专享] " : "[任务卡] "}${qItem.title || qItem.name || qItem.offerId}`,
+                                        title: `[任务卡] ${qItem.title || qItem.name || qItem.offerId}`,
                                         points: Number(qItem.points || qItem.pointProgressMax || 10),
                                         offerId: qItem.offerId,
                                         hash: qItem.hash,
-                                        kind: isDesktopChild ? "desktop_app" : "quest_child",
+                                        kind: "quest_child",
                                         destination: qItem.destination || qItem.destinationUrl || qItem.href || "",
                                         url: questUrl
                                     });
@@ -2520,8 +2807,7 @@ Notice:
                             "next-router-state-tree": encodeURIComponent(JSON.stringify(tree)),
                             "referer": referer,
                             "origin": "https://rewards.bing.com",
-                            ...(deployId ? { "x-deployment-id": deployId } : {}),
-                            ...(card.kind === "desktop_app" ? RewardsAuto.desktopAppHeaders : {})
+                            ...(deployId ? { "x-deployment-id": deployId } : {})
                         },
                         data: JSON.stringify([card.hash, 11, { offerid: card.offerId, isPromotional: "$undefined", timezoneOffset: String(new Date().getTimezoneOffset()) }])
                     });
@@ -2901,8 +3187,6 @@ Notice:
         signDate: 0, readDate: 0, promosDate: 0, searchDate: 0, dailySetDate: 0, streakDays: 0,
         signPoint: -1, signTimes: 0, readTimes: 0, promosTimes: 0,
         signAppPoint: -1, signPCPoint: -1, promoStats: { ok: 0, fail: 0 }, dailySetStats: { ok: 0, fail: 0 },
-        // 桌面应用周任务：本轮进度与到账统计（v1.8.0 新增）
-        desktopDate: 0, desktopTotal: 0, desktopDone: 0, desktopStats: { ok: 0, fail: 0 },
         // 运行锁：内存态在 service worker 被回收后不可靠，故持久化到 GM 存储防止新旧两轮并发
         runId: null,
         sleepMs: 0,
@@ -3001,8 +3285,9 @@ Notice:
             // v1.8.5 只做排障增强（保留服务端响应体 / 连接层详情 / 连续失败熔断），业务语义未变；
             //        这里的重置只清「当日尝试计数」，不含「已完成」标记，重复执行无副作用
             // v1.8.6 是纯代码整理（删死代码 / 合并重复解析与请求头），不改任何业务判定；
-            //        保留同一重置逻辑，重复执行无副作用
-            const engineVersion = "1.8.6";
+            // v2.0.0 移除了桌面应用周任务（服务端不认网页身份交卷）与面板死代码，
+            //        业务判定同样未变，沿用同一重置逻辑，重复执行无副作用
+            const engineVersion = "2.0.0";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -3216,207 +3501,6 @@ Notice:
             }
         },
 
-        /**
-         * 桌面应用周任务（Rewards App 每周专属 punchcard）
-         * 说明：这类卡只有「桌面客户端」身份交卷才会记账，普通浏览器身份一律不计分，
-         *      因此整段都用 MSRewards 桌面 UA + X-MSRewards-App 头访问 /earn 与 quest 页。
-         * @returns {Promise<void>}
-         */
-        async doDesktopWeeklyQuests() {
-            if (!GM_getValue("Tasks.desktop", true)) return;
-            const today = RewardsAuto.state.dateNowNum;
-            if (this.desktopDate === today && this.desktopTotal > 0 && this.desktopDone >= this.desktopTotal) {
-                Utils.log("✅", "桌面应用周任务：本轮已完成，跳过");
-                return;
-            }
-            const weeklyRe = /WW_pcparent_RewardsApp_weekly/i;
-            const appHeaders = { ...RewardsAuto.desktopAppHeaders, "referer": "https://rewards.bing.com/earn" };
-            // v1.8.2：交卷 500 时每轮只告警一次，其余写入调试缓冲（避免每天刷 6 条黄字）
-            const submit500Notified = { value: false };
-            /**
-             * 从 quest 页 HTML 解析 pcchild 子项（Flight 数据反转义后按 offerId 就近取同对象字段）
-             * @param {string} raw quest 页 HTML
-             * @returns {Array<Object>} 子项（offerId/hash/title/href/isCompleted/isLocked）
-             */
-            const parseKids = (raw) => {
-                const t = String(raw || "")
-                    .replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
-                    .replace(/\\"/g, '"');
-                const kids = [];
-                const re = /"offerId"\s*:\s*"([A-Za-z0-9_]*_pcchild[^"]+)"/g;
-                let m;
-                while ((m = re.exec(t)) !== null) {
-                    const seg = t.slice(Math.max(0, m.index - 500), m.index + 600);
-                    const after = t.slice(m.index, m.index + 700);
-                    kids.push({
-                        offerId: m[1],
-                        hash: (seg.match(/"hash"\s*:\s*"([^"]{8,})"/) || [])[1] || "",
-                        href: (seg.match(/"(?:href|destination)"\s*:\s*"([^"]+)"/) || [])[1] || "",
-                        title: (((seg.match(/"(?:ariaLabel|linkText)"\s*:\s*"([^"]{2,80})"/) || [])[1] || "").trim()) || m[1],
-                        isCompleted: /"isCompleted"\s*:\s*true/.test(after),
-                        isLocked: /"isLocked"\s*:\s*true/.test(after)
-                    });
-                }
-                return kids.filter((k) => k.hash);
-            };
-            /**
-             * 应用内搜索上报：先 ncheader 建立会话，再 reportActivity 上报搜索 URL
-             * @param {string} href 子项目标链接（bing.com/search?...）
-             * @returns {Promise<boolean>} 是否上报成功
-             */
-            const reportAppSearch = async (href) => {
-                try {
-                    await Utils.xhr({
-                        url: "https://www.bing.com/rewardsapp/ncheader",
-                        headers: { "x-rewards-source": "msrewards-desktop", "referer": "https://www.bing.com/" }
-                    }).catch(() => {});
-                    const res = await Utils.xhr({
-                        method: "POST", url: "https://www.bing.com/rewardsapp/reportActivity",
-                        headers: {
-                            "content-type": "application/x-www-form-urlencoded",
-                            "x-rewards-source": "msrewards-desktop", "referer": "https://www.bing.com/"
-                        },
-                        data: `url=${encodeURIComponent(href)}&V=web`
-                    });
-                    return /true/i.test(String(res || ""));
-                } catch (e) {
-                    Utils.debug("desktop-weekly", `应用内搜索上报失败: ${e.message}`);
-                    return false;
-                }
-            };
-            let earnHtml = "";
-            try {
-                earnHtml = await Utils.xhr({ url: "https://rewards.bing.com/earn", headers: appHeaders });
-            } catch (e) {
-                Utils.debug("desktop-weekly", `earn 页拉取失败: ${e.message}`);
-                return;
-            }
-            const parentIds = [...new Set([...String(earnHtml || "").matchAll(/\/earn\/quest\/([A-Za-z0-9_%.-]*punchcard[A-Za-z0-9_%.-]*)/g)].map((x) => x[1]))]
-                .map((id) => { try { return decodeURIComponent(id); } catch (_) { return id; } })
-                .filter((id) => weeklyRe.test(id));
-            if (!parentIds.length) {
-                Utils.debug("desktop-weekly", "本周没有 RewardsApp 每周专属任务卡");
-                return;
-            }
-            const actions = await API.resolveServerActions(String(earnHtml || ""));
-            const nextAction = actions && actions.reportActivity;
-            const deployMatch = String(earnHtml || "").match(/[?&](?:amp;)?dpl=([A-Za-z0-9._-]+)/)
-                || String(earnHtml || "").match(/"buildId"\s*:\s*"([A-Za-z0-9._-]+)"/);
-            const tree = ["", { children: ["(nav)", { children: ["earn", { children: ["PAGE", {}, null, null, 4096] }, null, null, 4096] }, null, null, 4096] }, null, null, 4096 + 16];
-            for (const parentId of parentIds) {
-                const pageUrl = "https://rewards.bing.com/earn/quest/" + encodeURIComponent(parentId);
-                Utils.log("🗓️", `发现桌面应用周任务卡：${parentId}`);
-                let qHtml = "";
-                try {
-                    qHtml = await Utils.xhr({ url: pageUrl, headers: appHeaders });
-                } catch (e) {
-                    Utils.log("🟡", `周任务详情页拉取失败: ${e.message}`);
-                    continue;
-                }
-                const kids = parseKids(qHtml);
-                if (!kids.length) {
-                    Utils.debug("desktop-weekly", `周任务 ${parentId} 未解析到子项`);
-                    continue;
-                }
-                this.desktopTotal += kids.length;
-                this.desktopDone += kids.filter((k) => k.isCompleted).length;
-                Utils.log("🗓️", `周任务子项 ${kids.length} 个（未完成 ${kids.filter((k) => !k.isCompleted).length} · 锁定 ${kids.filter((k) => k.isLocked).length}）`);
-                if (kids.every((k) => k.isCompleted)) {
-                    Utils.log("✅", "桌面应用周任务：全部子项已完成");
-                    continue;
-                }
-                // v1.8.5：连续交卷失败（尤其连接层被掐断）时不再硬撑后续子项，
-                // 先停一轮看回执，避免把 WAF 触发得更狠
-                let consecutiveFail = 0;
-                const pendingKids = kids.filter((x) => !x.isCompleted && !x.isLocked);
-                for (const k of pendingKids) {
-                    if (!this.touchRunLock()) throw new Error("RUN_LOCK_LOST");
-                    if (consecutiveFail >= 2) {
-                        Utils.log("🟡", `周任务: 已连续 ${consecutiveFail} 项交卷失败，本轮提前停止（剩余 ${pendingKids.length - pendingKids.indexOf(k)} 项未尝试）`);
-                        break;
-                    }
-                    Utils.log("🗓️", `周任务子项「${k.title}」开始处理`);
-                    // 1) 先按子项类型触发一次真实动作（应用内搜索 / 打开落地页）
-                    if (/bing\.com\/search/i.test(k.href || "")) {
-                        const ok = await reportAppSearch(k.href);
-                        Utils.log(ok ? "✅" : "🟡", `周任务: 应用内搜索上报${ok ? "成功" : "未确认"}（${k.offerId}）`);
-                        await Utils.randomDelay(2500, 4500);
-                    } else if (k.href) {
-                        await Utils.xhr({ url: "https://rewards.bing.com" + k.href, headers: appHeaders }).catch(() => {});
-                        await Utils.randomDelay(2000, 3500);
-                    }
-                    // 2) 用桌面客户端身份交卷（Server Action，payload 与活动卡一致）
-                    if (!nextAction) {
-                        Utils.log("🟡", "周任务: 未解析到 reportActivity action id，无法交卷");
-                        continue;
-                    }
-                    const submitPayload = [k.hash, 11, { offerid: k.offerId, isPromotional: "$undefined", timezoneOffset: "-480" }];
-                    // v1.8.2：每轮记录一次完整 payload 样本，供定位交卷 500 根因
-                    if (!submit500Notified.payloadLogged) {
-                        submit500Notified.payloadLogged = true;
-                        Utils.log("🟢", `周任务交卷 payload 样本: ${JSON.stringify(submitPayload)} action=${nextAction}`);
-                    }
-                    try {
-                        const res = await Utils.xhr({
-                            method: "POST", url: "https://rewards.bing.com/earn",
-                            headers: {
-                                "accept": "text/x-component", "content-type": "text/plain;charset=UTF-8",
-                                "next-action": nextAction,
-                                "next-router-state-tree": encodeURIComponent(JSON.stringify(tree)),
-                                "referer": pageUrl, "origin": "https://rewards.bing.com",
-                                ...(deployMatch ? { "x-deployment-id": deployMatch[1] } : {}),
-                                ...RewardsAuto.desktopAppHeaders
-                            },
-                            data: JSON.stringify(submitPayload)
-                        });
-                        const accepted = /^\d+:true\s*$/m.test(String(res || ""));
-                        Utils.debug("desktop-submit", `子项「${k.title}」回执原文: ${String(res || "")}`);
-                        if (accepted) {
-                            consecutiveFail = 0;
-                            this.desktopStats.ok += 1;
-                            this.desktopDone += 1;
-                            Utils.log("✅", `周任务子项「${k.title}」交卷受理`);
-                        } else {
-                            consecutiveFail += 1;
-                            this.desktopStats.fail += 1;
-                            Utils.log("🟡", `周任务子项「${k.title}」未受理（回执 ${String(res || "").slice(0, 60) || "空"}）`);
-                        }
-                    } catch (e) {
-                        consecutiveFail += 1;
-                        this.desktopStats.fail += 1;
-                        // v1.8.2：HTTP 500 每轮只发一次告警，其余写调试缓冲（避免每天刷 6 条黄字）
-                        // v1.8.5：告警文案里带上服务端响应体/连接层详情，直接定位根因
-                        if (/^HTTP\s+500/.test(e.message)) {
-                            const bodyInfo = e.body ? `｜响应体(${e.bodyLen}B): ${e.body}` : "｜无响应体";
-                            Utils.debug("desktop-submit", `子项「${k.title}」交卷 500 详情: ${e.message}${bodyInfo}`);
-                            if (!submit500Notified.value) {
-                                submit500Notified.value = true;
-                                Utils.log("🟡", `周任务交卷返回 HTTP 500（本轮仅此一次告警）${bodyInfo}`);
-                            }
-                        } else if (e.network) {
-                            Utils.debug("desktop-submit", `子项「${k.title}」交卷连接失败详情: ${e.message} ${e.detail || ""}`);
-                            Utils.log("🟡", `周任务子项「${k.title}」交卷连接失败: ${e.message}｜${e.detail || "无详情"}`);
-                        } else {
-                            Utils.log("🟡", `周任务子项「${k.title}」交卷失败: ${e.message}${e.status ? `（状态 ${e.status}${e.body ? `｜响应体: ${e.body}` : ""}）` : ""}`);
-                        }
-                    }
-                    await Utils.randomDelay(3000, 5000);
-                }
-                // 3) 到账复核：回读子项完成态（全部完成后服务端会撤下子项）
-                try {
-                    const after = await Utils.xhr({ url: pageUrl, headers: appHeaders });
-                    const afterKids = parseKids(after);
-                    const doneNow = afterKids.length === 0 ? kids.length : afterKids.filter((x) => x.isCompleted).length;
-                    this.desktopDone += Math.max(0, doneNow - kids.filter((x) => x.isCompleted).length);
-                    Utils.log(doneNow >= kids.length ? "✅" : "🟡",
-                        `周任务复核完成 ${doneNow}/${kids.length}${afterKids.length === 0 ? "（子项已撤下，按全部完成计）" : ""}`);
-                } catch (e) {
-                    Utils.debug("desktop-weekly", `周任务复核失败: ${e.message}`);
-                }
-            }
-            this.desktopDate = today;
-        },
-
         async doPromos() {
             if (!GM_getValue("Tasks.promos", true)) return;
             const today = RewardsAuto.state.dateNowNum;
@@ -3467,7 +3551,7 @@ Notice:
                 }
             }
 
-            // 第二优先：HTML/Flight 发现的卡片（含桌面专享、拼图、quiz 等）
+            // 第二优先：HTML/Flight 发现的卡片（含拼图、quiz 等需人工的类型）
             Utils.log("🧩", "扫描活动卡片...");
             // 跳过启动预检时服务端已完成的卡片，避免重复上报
             const pre = RewardsAuto.precheck;
@@ -3553,7 +3637,7 @@ Notice:
                 `✍️ 签到 PC${signPC} APP${signApp}`,
                 `📖 阅读 ${progressText(stats.read)} · 🔍 搜索 ${progressText(stats.search)}`,
                 `🎯 日常 ${fmtGroup(stats.dailySet)} · 任务卡 ${fmtGroup(stats.punchcard)}`,
-                `🎴 活动 ${fmtGroup(stats.evergreen)} · 打卡 ${stats.checkin.known ? `${stats.checkin.streak}天` : "—"} · 🗓️ 周任务 ${this.desktopTotal > 0 ? `${this.desktopDone}/${this.desktopTotal}` : "—"}`,
+                `🎴 活动 ${fmtGroup(stats.evergreen)} · 打卡 ${stats.checkin.known ? `${stats.checkin.streak}天` : "—"}`,
                 `⚡ 成功 ${execOk} · 失败 ${execFail} · 待领 ${stats.claimable > 0 ? `+${stats.claimable}` : "0"} · 需人工 ${RewardsAuto.humanNeeded.size}`
             ];
             return lines.join("\n");
@@ -4005,8 +4089,6 @@ Notice:
             GM_setValue("Config.lastRunTs", Date.now());
             RewardsAuto.state.pc401 = false;
             RewardsAuto.humanNeeded.clear();
-            this.desktopTotal = 0;
-            this.desktopDone = 0;
             try {
                 RewardsAuto.state.startTime = Utils.getTimestamp();
                 Utils.log("🚀", "启动全能自动化任务...");
@@ -4067,13 +4149,6 @@ Notice:
                     await Utils.randomDelay();
                 }
                 await withRetry(() => this.doPromos(), "活动卡片");
-                // 桌面应用周任务：网页端身份不记账，必须用桌面客户端身份交卷；失败不影响主流程
-                try {
-                    await this.doDesktopWeeklyQuests();
-                } catch (e) {
-                    if (e.message === "RUN_LOCK_LOST") throw e;
-                    Utils.log("🟡", `桌面应用周任务异常: ${e.message}`);
-                }
                 await Utils.randomDelay();
                 await withRetry(() => this.doSearch(), "搜索");
                 // 搜索行为会触达服务端签到计数器，此处复核一次可修正上报被拒造成的误判
@@ -4353,15 +4428,65 @@ Notice:
         const broState = GM_getValue("Notice.bro", true) ? "开" : "关";
         const todayDone = [["签到", TaskManager.signDate], ["阅读", TaskManager.readDate], ["活动", TaskManager.promosDate], ["搜索", TaskManager.searchDate]]
             .filter(([, d]) => d === RewardsAuto.state.dateNowNum).length;
-        Utils.safeAlert(
-            `RefreshToken: ${token ? "已保存" : "无"}\n`
+        const plainText = `RefreshToken: ${token ? "已保存" : "无"}\n`
             + `获取时间: ${tokenDate}\n已过: ${ageStr}\n`
             + `AccessToken: ${accessState}\n授权码: ${GM_getValue("Config.code", "") ? "有" : "无"}\n`
             + `${errLine}\n\n`
             + `今日进度: ${todayDone}/4 项（签到·阅读·活动·搜索）\n`
             + `浏览器通知: ${broState}\n推送目标: ${pushState}\n`
-            + `版本: ${GM_info.script.version}`
-        );
+            + `版本: ${GM_info.script.version}`;
+        const panel = Utils.showPanel({
+            title: "运行状态",
+            meta: `v${GM_info.script.version}`,
+            stats: [
+                { label: "今日得分", value: "…" },
+                { label: "任务完成", value: "…" },
+                { label: "账户余额", value: "…" },
+                { label: "连续签到", value: "…" }
+            ],
+            logTitle: "账号与推送",
+            log: [
+                `RefreshToken   ${token ? `已保存 · ${ageStr}前` : "无"}`,
+                `获取时间       ${tokenDate}`,
+                `AccessToken    ${accessState}`,
+                `授权码         ${GM_getValue("Config.code", "") ? "有" : "无"}`,
+                `浏览器通知     ${broState}　推送目标 ${pushState}`,
+                `今日进度       ${todayDone}/4 项（签到·阅读·活动·搜索）`,
+                errLine,
+                `版本           v${GM_info.script.version}`
+            ],
+            text: plainText,
+            textTitle: "纯文本（可复制）",
+            actions: [
+                {
+                    label: "立即运行",
+                    primary: true,
+                    onClick: (area, close) => {
+                        close();
+                        TaskManager.runAll(true).catch(e => Utils.log("🔴", `手动运行失败: ${e.message}`));
+                    }
+                },
+                {
+                    label: "刷新",
+                    onClick: () => {
+                        API.getServerStats().then((stats) => {
+                            const model = Utils.buildPanelModel(stats, { tokenReady: Boolean(token) });
+                            panel.setStats(model.stats);
+                            panel.setRows(model.rows);
+                        }).catch((e) => Utils.log("🔴", `刷新统计失败: ${e.message}`));
+                    }
+                },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 面板先出，统计异步补进来（getServerStats 需要一次网络往返）
+        API.getServerStats().then((stats) => {
+            const model = Utils.buildPanelModel(stats, { tokenReady: Boolean(token) });
+            if (panel) {
+                panel.setStats(model.stats);
+                panel.setRows(model.rows);
+            }
+        }).catch((e) => Utils.log("🔴", `获取运行统计失败: ${e.message}`));
     });
 
     // v1.8.1：去掉「忽略次日锁定」——跨日跳过逻辑已在 v1.8.0 删除，标签留着会误导
@@ -4446,8 +4571,8 @@ Notice:
      */
     async function showDebugInfo() {
         /**
-         * 构造调试信息文本
-         * @returns {Promise<string>} 分区后的调试文本
+         * 构造调试信息（同时产出结构化面板模型与纯文本）
+         * @returns {Promise<{text:string,stats:Array<Object>,rows:Array<Object>,log:Array<string>}>} 调试数据
          */
         const buildDebugText = async () => {
             // 后台实例的内存态可能为空，先续期 Token，否则 DAPI 数据全部取不到
@@ -4500,7 +4625,21 @@ Notice:
                 `【Server Action】\nreportActivity ${actions.reportActivity ? "已解析" : "未解析"} · reportClaimAllPoints ${actions.reportClaimAllPoints ? "已解析" : "未解析"}\n已发现 ${actions.all ? actions.all.length : 0} 个动作ID：${Object.values(actions.names || {}).slice(0, 10).join(", ") || "—"}`,
                 `【最近调试】\n${recent}`
             ];
-            return sections.join("\n\n");
+            const model = Utils.buildPanelModel(stats, { tokenReady: Boolean(RewardsAuto.state.token) });
+            const lastErr = GM_getValue("Config.lastTokenError", null);
+            return {
+                text: sections.join("\n\n"),
+                stats: model.stats,
+                rows: model.rows,
+                log: [
+                    `环境        ${GM_info.script.version} · ${/Edg\//.test(ua) ? "Edge" : "Chrome"} · ${new Date().toLocaleString("zh-CN")}`,
+                    `Token       ${RewardsAuto.state.token ? "已就绪" : `未获取${tokenError ? `（${tokenError}）` : ""}`} · 地区 ${RewardsAuto.state.region} · 主机 ${RewardsAuto.state.host}`,
+                    lastErr ? `最近授权错误 [${new Date(Number(lastErr.t) || 0).toLocaleTimeString("zh-CN")}] ${lastErr.grant} → ${lastErr.error} ${lastErr.description || ""}` : "最近授权错误 无",
+                    `Cookie      ${cookieNames.length} 项${RewardsAuto.state.pc401 ? " · PC 会话未登录" : ""}`,
+                    `Server Act  reportActivity ${actions.reportActivity ? "已解析" : "未解析"} · claimAll ${actions.reportClaimAllPoints ? "已解析" : "未解析"} · ${actions.all ? actions.all.length : 0} 个动作`,
+                    `已完成      ${stats ? stats.completedOfferIds.length : 0} 项 offer`
+                ]
+            };
         };
 
         // 后台上下文没有 DOM 时降级为通知
@@ -4510,17 +4649,41 @@ Notice:
         // 页面上下文直接使用浏览器原生弹框（与旧版导出体验一致）；后台上下文降级为通知
         try { Utils.safeAlert("🔧 正在采集调试信息，请稍候…"); } catch (_) { notify("正在采集，请稍候…"); }
         try {
-            const text = await buildDebugText();
+            const debug = await buildDebugText();
+            const text = debug.text;
             GM_setValue("Config.lastDebugInfo", text);
             const copied = Utils.copyText(text);
             const note = copied
                 ? "✅ 已复制到剪贴板，可直接粘贴"
                 : "⚠️ 自动复制失败，请点击「复制全部」或手动全选复制";
             GM_setValue("Config.pendingDebugNote", note);
-            // 先明确告知复制结果，再展示正文
-            try { Utils.safeAlert(note); } catch (_) { notify(note.replace(/^[✅⚠️]+\s*/, "")); }
-            // 页面上下文直接弹面板；后台上下文没有 DOM：复制后打开页面面板展示
-            const panel = Utils.showTextPanel("🔧 调试信息", text, note);
+            // 不再用原生 alert 打断流程：复制结果直接作为面板的 note 提示条
+            const panel = Utils.showPanel({
+                title: "调试信息",
+                meta: `v${GM_info.script.version}`,
+                note,
+                stats: debug.stats,
+                rows: debug.rows,
+                logTitle: "环境与账号",
+                log: debug.log,
+                text,
+                textTitle: "完整调试文本（可复制）",
+                actions: [
+                    {
+                        label: "复制全部",
+                        primary: true,
+                        onClick: (area) => {
+                            const ok = Utils.copyText(text);
+                            Utils.log(ok ? "✅" : "⚠️", ok ? "调试信息已复制" : "复制失败，请手动全选", false);
+                            if (area) {
+                                area.focus();
+                                area.select();
+                            }
+                        }
+                    },
+                    { label: "关闭", onClick: (area, close) => close() }
+                ]
+            });
             if (!panel) {
                 GM_setValue("Config.pendingDebugView", true);
                 try { GM_openInTab("https://rewards.bing.com/earn", { active: true }); } catch (_) {}
@@ -4699,11 +4862,38 @@ Notice:
             // 后台 service worker 无 DOM 时，统一走剪贴板 + 通知
             const copied = Utils.copyText(json);
             GM_setValue("Config.lastDebugInfo", json);
-            const panel = Utils.showTextPanel("🧪 诊断数据", json);
-            // 与旧版一致：页面上下文用原生弹框明确提示复制结果
-            try {
-                Utils.safeAlert(copied ? "✅ 诊断数据已复制到剪贴板，请直接粘贴。" : "⚠️ 自动复制失败，请在面板中点击「复制全部」。");
-            } catch (_) {}
+            const note = copied
+                ? "✅ 诊断数据已复制到剪贴板，请直接粘贴。"
+                : "⚠️ 自动复制失败，请点「复制全部」后手动粘贴。";
+            const panel = Utils.showPanel({
+                title: "诊断数据",
+                meta: `${(json.length / 1024).toFixed(1)} KB`,
+                note,
+                logTitle: "接口覆盖",
+                log: Object.keys(report.endpoints || {}).map((k) => {
+                    const item = report.endpoints[k];
+                    if (!item) return `${k}  —`;
+                    if (item.error) return `${k}  ✕ ${item.error}`;
+                    const size = item.length || item.bytes || 0;
+                    return `${k}  ✓ ${size ? `${size} B` : "ok"}`;
+                }),
+                text: json,
+                textTitle: "完整 JSON（可复制）",
+                actions: [
+                    {
+                        label: "复制全部",
+                        primary: true,
+                        onClick: (area) => {
+                            Utils.copyText(json);
+                            if (area) {
+                                area.focus();
+                                area.select();
+                            }
+                        }
+                    },
+                    { label: "关闭", onClick: (area, close) => close() }
+                ]
+            });
             if (!panel) {
                 GM_setValue("Config.pendingDebugView", true);
                 try { GM_openInTab("https://rewards.bing.com/earn", { active: true }); } catch (_) {}
@@ -4760,11 +4950,28 @@ Notice:
          * 渲染上次保存的调试文本
          */
         const renderPendingDebug = () => {
-            Utils.showTextPanel(
-                "🔧 调试信息",
-                GM_getValue("Config.lastDebugInfo", "（暂无调试信息）"),
-                GM_getValue("Config.pendingDebugNote", "")
-            );
+            const text = GM_getValue("Config.lastDebugInfo", "（暂无调试信息）");
+            Utils.showPanel({
+                title: "调试信息",
+                meta: `v${GM_info.script.version}`,
+                note: GM_getValue("Config.pendingDebugNote", ""),
+                text,
+                textTitle: "完整调试文本（可复制）",
+                actions: [
+                    {
+                        label: "复制全部",
+                        primary: true,
+                        onClick: (area) => {
+                            Utils.copyText(text);
+                            if (area) {
+                                area.focus();
+                                area.select();
+                            }
+                        }
+                    },
+                    { label: "关闭", onClick: (area, close) => close() }
+                ]
+            });
         };
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderPendingDebug);
         else renderPendingDebug();

@@ -2,7 +2,7 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.8.6 · License：MIT
+> 版本：v2.0.0 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 > v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
 
@@ -14,11 +14,30 @@
 - **阅读**：新闻阅读任务，动态解析 Server Action 上报
 - **搜索**：真实热词池搜索 + 随机间隔，模拟真人行为；配额取 DAPI 搜索任务与 dashboard 服务端数据
 - **任务**：每日任务集、活动卡片、待领取积分（Server Action 自动领取）、连续签到奖励自动领取
-- **桌面应用周任务**：v1.8.0 新增，用 Rewards 桌面客户端身份完成「WW_pcparent_RewardsApp_weekly」周卡子项
 - **需人工分类**：v1.8.0 新增，Quiz 卡、+10 带锁拼图、App 内搜索卡、等级不足卡会被识别并跳过，在日报里计为「需人工」而不再当成失败重试
 - **推送**：半程进度提醒、每日日报、异常提醒（异常按 6 小时/同 key + 每小时 3 条节流）
 - **调度**：crontab 每 20 分钟后台运行；运行锁防并发；**每天固定运行，不会因为前几天已完成而跳过整日**
-- **调试**：Token 状态、调试日志环形缓冲、诊断数据一键导出
+- **控制台面板**：v2.0 新增，运行状态 / 调试信息 / 诊断数据统一成暗色可视化面板——指标条（今日得分、任务完成、余额、连续签到）+ 任务队列行 + 实时日志 + 可折叠原文，Shadow DOM 隔离宿主页样式，Esc 或点遮罩关闭
+
+## 🆕 v2.0 变更与已知限制
+
+v2.0 是**界面重做 + 功能收敛**的一次大版本：把以前散落在 `alert` / `prompt` 里的信息统一收进暗色控制台面板，同时**移除一条始终没能跑通的通道**。
+
+**做了什么**
+
+- 面板内核重写：`Utils.panelCss()` + `Utils.buildPanelModel()` + `Utils.showPanel()`，Shadow DOM + `adoptedStyleSheets` 隔离样式，不再往宿主页里塞内联样式
+- 四个入口全部改用新面板：📊 运行状态、🔧 调试信息、🧪 诊断数据、跨上下文回显（后台触发时自动在 Rewards 页弹出）
+- 面板内容分四层：顶部指标条（今日得分 / 任务完成 / 账户余额 / 连续签到）、任务队列（授权 Token、PC 签到、App 签到、PC 搜索、新闻阅读、日常任务、任务卡、活动卡片、待领取积分，五态 `✓ ◐ · – !`）、等宽日志区、可折叠的「完整原文」（复制用）
+- 指标条数值来自 `API.getServerStats()`，面板先秒开、数据回来再刷新，不阻塞
+- 删除零引用的 `Utils.showTextPanel` 与全部面板内联样式代码
+
+**已知限制：桌面应用周任务已移除**
+
+v1.8.0 曾尝试用 Rewards 桌面客户端身份（伪造 `MSRewards/Desktop` UA + `X-MSRewards-App: 1` + `X-Rewards-Source: msrewards-desktop`）接「`WW_pcparent_RewardsApp_weekly` 周卡」：拉 `/earn` → 解析 `*_pcchild*` 子项 → 应用内搜索走 `bing.com/rewardsapp/reportActivity` → 交卷走 `reportActivity` Server Action（`[hash, 11, {offerid, isPromotional, timezoneOffset}]`）→ 回读复核。
+
+结果：**子项的搜索上报能成功，但交卷长期 HTTP 500**。v1.8.2 加 payload 样本日志与告警收敛、v1.8.5 加连接层详情与连续失败熔断，逐轮排查后确认根因是**服务端 Origin 白名单 —— 浏览器不允许 GM_xhr 自定义 `Origin`**，不是 action id 过期、也不是载荷格式问题。这条通道在当前「浏览器用户脚本」架构下走不通，v2.0 把整段落连同配置项一起删除，而不是留着一个永远失败的开关。
+
+> 需要周任务积分的话，只能人工在 Microsoft Rewards 桌面/手机 App 里完成，脚本不再代做，也不会再在日志里刷黄色告警。
 
 ## 📲 推送渠道
 
@@ -74,10 +93,10 @@
 | 登录回调捕获 | 在 `oauth20_desktop.srf` 截获 OAuth code，兑换并续期 access token |
 | RewardsAuto | UA / offerId / 搜索词池 / 跳过规则等常量与运行状态（含兜底的领取 action id） |
 | PushPlus | 推送配置读取与就绪判定（endpoint、token、开关） |
-| Utils | 缓存（TTL+单飞）、安全 UI 封装、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()` |
+| Utils | 缓存（TTL+单飞）、安全 UI 封装、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()`；v2.0 新增 `panelCss()` / `buildPanelModel()` / `showPanel()` 面板内核（Shadow DOM 隔离） |
 | API 层 | token 生命周期、**dashboard 服务端渲染解析**（余额/等级/连签/待领取）、DAPI 511 字段适配、阅读与卡片（Server Action 动态解析）、搜索（热词 + 配额）、区域检查 |
 | 自动领取 | 两跳定位懒加载 chunk 里的 `reportClaimAllPoints` action id → `POST /dashboard`（`Next-Action` 头 + `[]`）→ 余额复核 |
-| TaskManager | 运行锁、完成调度、七项任务执行、报表汇总、收尾推送 |
+| TaskManager | 运行锁、完成调度、六项任务执行（阅读 / 签到 / 活动卡片 / 搜索 / 连签检测 / 每日活动 + 待领取）、报表汇总、收尾推送 |
 | 菜单系统 | 授权 / 兑换 / 状态 / 立即运行 / 推送配置 / 测试通知 / 调试导出 |
 | init | crontab 注册；Bing 搜索页跳过初始化；登录回调页立即兑换 token |
 
@@ -100,6 +119,37 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v2.0.0（控制台面板重做 + 移除桌面周任务）
+
+这一版两条主线：**界面**全部重做，**功能**收敛掉一条验证失败的通道。
+
+#### 1. 暗色控制台面板（新增）
+
+| 方法 | 职责 |
+| --- | --- |
+| `Utils.panelCss()` | 返回整段面板 CSS，注入 Shadow DOM；`:host` 上定义 `--pc-bg / --pc-surface / --pc-fg / --pc-muted / --pc-border / --pc-accent` 等变量，宿主页样式无法污染面板 |
+| `Utils.buildPanelModel(stats, extra)` | 把 `API.getServerStats()` 的结果转成「4 项指标 + 9 行任务队列」，`statusOf()` 统一输出 `ok / run / wait / skip / fail` 五态 |
+| `Utils.showPanel(opts)` | 面板外壳：overlay + 卡片 + 头部 + 指标条 + 任务行 + 日志区 + 可折叠原文 + 底部按钮；Esc 与点遮罩关闭；返回 `{setText, setRows, setStats, appendLog, close}` 句柄 |
+
+- 样式隔离用 `new CSSStyleSheet()` + `adoptedStyleSheets`，不支持时回退 `<style>`；**不新增 `@grant`**（没有 `GM_addStyle` 也能用）
+- 四个入口全部接上：📊 运行状态、🔧 调试信息、🧪 诊断数据、跨上下文回显
+- 运行状态面板先秒开显示骨架，`API.getServerStats()` 回来后异步填充指标，不阻塞菜单
+- 调试面板把原来的 `Utils.safeAlert(note)` 打断改为面板顶部提示条；诊断面板按 `report.endpoints` 生成 ✓/✕ 覆盖行
+- 补了细滚动条、`:focus-visible` 描边、`prefers-reduced-motion` 关动画、420px 以下转 2 列指标
+
+#### 2. 移除桌面应用周任务（整段删除）
+
+- 删除 `doDesktopWeeklyQuests()`（约 11.7 KB）、`RewardsAuto.desktopAppHeaders`、`Tasks.desktop` 配置项、`kindText.desktop_app`、`claimCard` 里的桌面头分支、日报的「🗓️ 周任务」字段、`TaskManager` 的 4 个 desktop 计数
+- 失败原因见上文「🆕 v2.0 变更与已知限制」：**子项搜索上报成功、交卷长期 HTTP 500，根因是服务端 Origin 白名单 + 浏览器不允许自定义 `Origin`**
+
+#### 3. 其它清理
+
+- 删除零引用的 `Utils.showTextPanel`（旧面板 API，三个调用点早已迁到 `showPanel`）
+- `@description` 去掉周任务措辞、补上 v2.0 面板卖点
+- `@version` 与 `engineVersion` 均升到 `2.0.0`；重置逻辑不变（只清当日尝试计数，不含「已完成」标记），重复执行无副作用
+- 脚本行数 5,319 → **5,065 行**；体积 298,766 B → **282,752 B**（相比「加完面板但周任务还在」的中间态 **−16,014 B / −254 行**）
+- 相对 v1.8.6 发布版（273,166 B / 4,858 行）净增 **+9,586 B / +207 行**——增量来自新面板内核（约 20 KB 的 CSS + 模型 + 外壳），周任务的净删量与面板增量相抵后略低
 
 ### v1.8.6（代码整理：删死代码 + 合并重复实现）
 
@@ -158,11 +208,13 @@ scriptcat-ms-rewards/
 
 ### v1.8.0（每天必跑 + 桌面周任务 + 需人工分类 + 通知节流）
 
+> ⚠️ 本节中的「桌面应用周任务」已在 v2.0 整段移除（交卷长期 HTTP 500，根因是服务端 Origin 白名单），保留此记录仅作历史追溯。
+
 - ❌ **彻底删除「连续 3 天全部完成后次日跳过」的跨日调度**（`readCompletionSchedule` / `isWaitingForNextDay` / `recordCompletion` 三个方法与全部调用点）。脚本现在**每天都会运行**，只要当天还有未完成项就继续补做；唯一的跳过是同轮并发保护（运行锁）
-- ✅ 新增**桌面应用周任务** `doDesktopWeeklyQuests()`：用 MSRewards 桌面客户端身份（UA + `X-MSRewards-App`）访问 `/earn`，定位 `WW_pcparent_RewardsApp_weekly` 周卡，解析 `pcchild` 子项，应用内搜索走 `rewardsapp/reportActivity`，交卷走 Server Action（`reportActivity`），最后回读复核
+- ✅ 新增**桌面应用周任务** `doDesktopWeeklyQuests()`：用 MSRewards 桌面客户端身份（UA + `X-MSRewards-App`）访问 `/earn`，定位 `WW_pcparent_RewardsApp_weekly` 周卡，解析 `pcchild` 子项，应用内搜索走 `rewardsapp/reportActivity`，交卷走 Server Action（`reportActivity`），最后回读复核（**v2.0 已移除**）
 - ✅ 新增**卡片原因分类** `_cardBlockReason()`：Quiz 卡（需落地页点答案）、`VerB_Locked_level` 带锁拼图（+10 只能真拼）、`form=ML2W4J/ML2Y2H` 应用内搜索卡、等级不足卡，命中即跳过并计入「需人工」，不再反复重试污染失败计数
 - ✅ 新增**通知分层节流**：同一异常 key 6 小时内只推一次，全局每小时最多 3 条，超限只写日志；日报/完成通知不受影响
-- ✅ 日报新增「🗓️ 周任务 x/y」与「需人工 N」两项
+- ✅ 日报新增「🗓️ 周任务 x/y」（**v2.0 已移除**）与「需人工 N」两项
 - 📄 新增「开源致谢」注释块与 README 感谢名单
 
 ### v1.7.0（更名 + 参考脚本对照结论）
