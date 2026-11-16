@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.2
+// @version      1.8.3
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -719,6 +719,51 @@ Notice:
                 Utils.debug("cookie", `Cookie(${url}): ${map.size ? map.size + " 项 [" + [...map.keys()].slice(0, 12).join(",") + "]" : "空"}`);
                 return str;
             });
+        },
+
+        /**
+         * 在真实会话 Cookie 后追加设备标记 _Rwho（用于区分桌面端 / 移动端搜索）
+         * 说明：_Rwho 是 Bing 的端侧标记（u=d 桌面、u=m 移动），Rewards 的
+         *      「需 App 内搜索」卡只认移动端身份发起的搜索。
+         *      请求头里的 cookie 是「整体覆盖」语义：只发 _Rwho 会把 MSPAuth / MUID
+         *      等登录态顶掉，服务端照样回 200，但 IsAuthenticated=false，卡片永不记账，
+         *      所以必须拼在真实会话 Cookie 之后。
+         * @param {string} base 浏览器真实 Cookie 串
+         * @param {"d"|"m"} deviceType 设备类型，d=桌面，m=移动
+         * @returns {string} 合并后的 Cookie 串
+         */
+        cookieWithRwho(base, deviceType) {
+            const d = new Date();
+            const ts = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+            const rwho = `_Rwho=u=${deviceType === "m" ? "m" : "d"}&ts=${ts}`;
+            const text = String(base || "");
+            if (!text) return rwho;
+            if (/(^|;\s*)_Rwho=/i.test(text)) {
+                return text.replace(/(^|;\s*)_Rwho=[^;]*/i, (m, p1) => `${p1}${rwho}`);
+            }
+            return `${text}; ${rwho}`;
+        },
+
+        /**
+         * 从搜索页 HTML 中提取 Bing 的 IG（本次会话的追踪 ID）
+         * 说明：ncheader 与 reportActivity 必须用同一个 IG；用随机 UUID 时服务端虽然回 200，
+         *      但这次搜索不会挂到当前会话上，计数不涨。
+         * @param {string} html 搜索页 HTML
+         * @returns {string} 大写 IG；取不到返回空串
+         */
+        extractIG(html) {
+            const text = String(html || "");
+            if (!text) return "";
+            const patterns = [
+                /[",]IG\s*:\s*"([0-9A-F]{16,40})"/i,
+                /IG=([0-9A-F]{16,40})/i,
+                /"ig"\s*:\s*"([0-9A-F]{16,40})"/i,
+            ];
+            for (const re of patterns) {
+                const m = text.match(re);
+                if (m) return String(m[1]).toUpperCase();
+            }
+            return "";
         },
 
         randomRange(min, max) {
@@ -2379,6 +2424,21 @@ Notice:
          * @param {Object} card 卡片对象（来自 earn 页或 DAPI）
          * @returns {string} 跳过原因；空字符串表示可以尝试自动完成
          */
+        /**
+         * 判断这张卡是否属于「需 App 内搜索」类型（form=ML2W4J / ML2Y2H 的 Bing 搜索卡）
+         * 说明：v1.8.3 起不再直接跳过这类卡，改为以移动端身份真实搜索一次再上报，
+         *      见 _claimCard 的策略 -1。
+         * @param {Object} card 卡片对象
+         * @returns {boolean} 是否需 App 内搜索
+         */
+        _isAppSearchCard(card) {
+            if (!card) return false;
+            if (card.kind === "quiz" || card.kind === "puzzle" || card.kind === "image_creator") return false;
+            const dest = String(card.destination || "");
+            if (!/bing\.com\/search/i.test(dest)) return false;
+            return /(^|[?&])form=(ML2W4J|ML2Y2H)(&|$)/i.test(dest);
+        },
+
         _cardBlockReason(card) {
             const text = `${card.offerId || ""} ${card.title || ""} ${card.destination || ""}`;
             if (card.kind === "quiz" || /quiz|BingQA_Quiz|Homepage%20quiz|form=ML2BF1/i.test(text)) {
@@ -2387,10 +2447,8 @@ Notice:
             if (/VerB_Locked_level/i.test(text)) {
                 return "需真拼：+10 带锁拼图只能人工完成";
             }
-            if (/form=ML2W4J|form=ML2Y2H/i.test(text)) {
-                return "需 App 内搜索：该卡只认 Rewards 手机客户端内的搜索";
-            }
-            if (/locked_level|_level2|_level3/i.test(text)) {
+            // form=ML2W4J / ML2Y2H 不再拦截：v1.8.3 起用移动端身份真实搜索后上报
+            if (/locked_level|_level2|_level3/i.test(text) && !this._isAppSearchCard(card)) {
                 return "等级不足：当前账号等级未达该卡要求";
             }
             return "";
@@ -2433,6 +2491,48 @@ Notice:
                 const startedAt = Date.now();
                 const ok = await this.reportDailyActivity(card.destination);
                 if (ok) return await this.settleCard(card, "访问上报", startedAt);
+            }
+
+            // 策略 -1: App 内搜索卡（form=ML2W4J / ML2Y2H）
+            // 这类卡只认 Rewards 手机客户端（或桌面 App）内的搜索行为，
+            // 用页面 UA 上报会被当成普通网页搜索、卡片不记账。
+            // v1.8.3 起以移动端身份（UA=mobile + _Rwho=u=m）真实打开搜索页，
+            // 取页面 IG 后按 SERP 协议上报，再回查卡片状态。
+            if (this._isAppSearchCard(card)) {
+                const startedAt = Date.now();
+                try {
+                    const dest = String(card.destination || "");
+                    let form = "ML2W4J";
+                    let query = "";
+                    try {
+                        const u = new URL(dest);
+                        const f = u.searchParams.get("form");
+                        if (f) form = f;
+                        query = u.searchParams.get("q") || u.searchParams.get("query") || "";
+                    } catch (_) {
+                        const m = dest.match(/[?&]q=([^&]+)/i);
+                        if (m) query = decodeURIComponent(m[1]);
+                        const fm = dest.match(/[?&]form=([^&]+)/i);
+                        if (fm) form = fm[1];
+                    }
+                    if (!query) {
+                        // 卡片 destination 不带搜索词时，用卡片标题当搜索词（服务端只校验"发生了应用内搜索"）
+                        query = String(card.title || "Microsoft Rewards").replace(/[+＋]\s*\d+\s*积分?/g, "").trim() || "Microsoft Rewards";
+                    }
+                    Utils.log("📱", `「${card.title || card.offerId}」按移动端身份搜索：${query}（form=${form}）`);
+                    const html = await API.getSearchPage(query, true, form);
+                    const pageOk = /b_results|b_algo/i.test(String(html || ""));
+                    if (!pageOk) {
+                        Utils.log("🟡", `移动端搜索页无结果结构，跳过该卡：${card.title || card.offerId}`);
+                    } else {
+                        const accepted = await API.reportSearch(html, query, true, form);
+                        if (accepted) return await this.settleCard(card, "移动端搜索上报", startedAt);
+                        Utils.log("🟡", `移动端搜索上报未被受理：${card.title || card.offerId}`);
+                    }
+                } catch (e) {
+                    Utils.debug("card-app-search", `${card.offerId} 失败: ${e && e.message ? e.message : e}`);
+                    Utils.log("🟡", `移动端搜索失败（将回退其它策略）：${e && e.message ? e.message : e}`);
+                }
             }
 
             // 策略 0: DAPI 后台接口（与必应 App 同源，最可靠）
@@ -2600,34 +2700,55 @@ Notice:
             return true;
         },
 
-        async getSearchPage(query, isMobile = false) {
+        /**
+         * 打开一次搜索页
+         * @param {string} query 搜索词
+         * @param {boolean} isMobile 是否使用移动端 UA 与 _Rwho=u=m
+         * @param {string} form Bing 的 form 参数（默认 QBLH；应用卡传 ML2W4J / ML2Y2H）
+         * @returns {Promise<string>} 页面 HTML
+         */
+        async getSearchPage(query, isMobile = false, form = "") {
             const mkt = GM_getValue("Config.lock", true) ? "&mkt=zh-CN" : "";
-            const cookie = await Utils.getCookieString(`https://${RewardsAuto.state.host}/`);
-            // 注入浏览器真实会话 Cookie，避免后台请求被视为未登录而不计分
+            const formParam = String(form || "QBLH");
+            const rawCookie = await Utils.getCookieString(`https://${RewardsAuto.state.host}/`);
+            // 注入浏览器真实会话 Cookie，避免后台请求被视为未登录而不计分；
+            // 移动端再追加 _Rwho=u=m，让服务端把这次搜索算到手机端
+            const cookie = Utils.cookieWithRwho(rawCookie, isMobile ? "m" : "d");
             const html = await Utils.xhr({
-                url: `https://${RewardsAuto.state.host}/search?q=${encodeURIComponent(query)}&form=QBLH${mkt}`,
+                url: `https://${RewardsAuto.state.host}/search?q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`,
                 headers: {
                     "user-agent": isMobile ? RewardsAuto.ua.mobile : RewardsAuto.ua.pc,
-                    "referer": `https://${RewardsAuto.state.host}/?form=QBLH`,
+                    "referer": `https://${RewardsAuto.state.host}/?form=${encodeURIComponent(formParam)}`,
                     ...(cookie ? { "cookie": cookie } : {})
                 }
             });
             const text = typeof html === "string" ? html : "";
-            Utils.debug("search-page", `len=${text.length} 结果=${/b_results|b_algo/i.test(text)} 登录标识=${/Rewards|_Rwho|SignOut|userinfo/i.test(text)}`);
+            Utils.debug("search-page", `${isMobile ? "移动端" : "PC"} form=${formParam} len=${text.length} IG=${Utils.extractIG(text) || "无"} 结果=${/b_results|b_algo/i.test(text)}`);
             return html;
         },
 
-        async reportSearch(html, query, isMobile = false) {
+        /**
+         * 上报一次搜索行为（ncheader + reportActivity）
+         * @param {string} html 搜索页 HTML（用于提取 IG）
+         * @param {string} query 搜索词
+         * @param {boolean} isMobile 是否使用移动端 UA 与 _Rwho=u=m
+         * @param {string} form Bing 的 form 参数（默认 QBLH）
+         * @returns {Promise<boolean>} 是否被服务端受理（未登录返回 false）
+         */
+        async reportSearch(html, query, isMobile = false, form = "") {
             try {
-                const ig = Utils.getRandomUUID();
+                // IG 优先取自搜索页（随机 UUID 不会挂到当前会话上，计数不涨）
+                const ig = Utils.extractIG(html) || Utils.getRandomUUID();
                 const mkt = GM_getValue("Config.lock", true) ? "&mkt=zh-CN" : "";
-                const params = `q=${encodeURIComponent(query)}&form=QBLH${mkt}`;
-                const cookie = await Utils.getCookieString(`https://${RewardsAuto.state.host}/`);
+                const formParam = String(form || "QBLH");
+                const params = `q=${encodeURIComponent(query)}&form=${encodeURIComponent(formParam)}${mkt}`;
+                const rawCookie = await Utils.getCookieString(`https://${RewardsAuto.state.host}/`);
                 // 注入浏览器真实会话 Cookie，确保上报请求被识别为已登录
+                const cookie = Utils.cookieWithRwho(rawCookie, isMobile ? "m" : "d");
                 const headers = {
                     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
                     "user-agent": isMobile ? RewardsAuto.ua.mobile : RewardsAuto.ua.pc,
-                    "referer": `https://${RewardsAuto.state.host}/?form=QBLH`,
+                    "referer": `https://${RewardsAuto.state.host}/?form=${encodeURIComponent(formParam)}`,
                     ...(cookie ? { "cookie": cookie } : {})
                 };
                 const headerRes = await Utils.xhr({
@@ -2925,7 +3046,8 @@ Notice:
             // 否则新版本当天会直接跳过活动/日常任务（v1.3.1/v1.3.2 都有这类残留）。
             // v1.6.0 更换了数据源（dashboard RSC + DAPI 字段适配），升级时重置一次当日尝试状态
             // v1.8.2 调整了活动卡片/每日活动的尝试计数语义，升版时再重置一次旧尝试态
-            const engineVersion = "1.8.2";
+            // v1.8.3 放开了 App 内搜索卡拦截，升版时重置一次，让此前被跳过的卡当天就能重试
+            const engineVersion = "1.8.3";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -3490,18 +3612,24 @@ Notice:
             if (!perSearch) perSearch = await API.getSearchStep();
             perSearch = Math.max(1, perSearch);
             Utils.log("🔍", `搜索配额: PC ${info.pc.progress}/${info.pc.max}（每次约 ${perSearch} 分）`);
+            // v1.8.3：手机端配额（pointsCounters.mobile）此前只解析不消费，这里一并补跑
+            const mob = info.mobile || { progress: 0, max: 0 };
+            const mobMax = Number(mob.max) || 0;
+            const mobCur = Number(mob.progress) || 0;
+            if (mobMax > 0) Utils.log("📱", `搜索配额: 手机 ${mobCur}/${mobMax}`);
             const pcDone = info.pc.progress >= info.pc.max;
-            if (pcDone) {
+            const mobDone = mobMax <= 0 || mobCur >= mobMax;
+            if (pcDone && mobDone) {
                 this.searchDate = RewardsAuto.state.dateNowNum;
                 this.save();
-                Utils.log("✅", `搜索配额已满 PC: ${info.pc.progress}/${info.pc.max}`);
+                Utils.log("✅", `搜索配额已满 PC: ${info.pc.progress}/${info.pc.max}${mobMax > 0 ? `，手机: ${mobCur}/${mobMax}` : ""}`);
                 return;
             }
             if (this.searchDate === RewardsAuto.state.dateNowNum) {
                 Utils.log("🟡", "搜索配额未满，继续执行搜索任务");
                 this.searchDate = 0;
             }
-            const isRestricted = await API.checkSearchRestricted(info);
+            const isRestricted = pcDone ? false : await API.checkSearchRestricted(info);
             if (isRestricted) {
                 this.searchDate = RewardsAuto.state.dateNowNum;
                 this.save();
@@ -3510,7 +3638,8 @@ Notice:
             // 服务端按积分计进度（CN 新体系每次搜索约 3 分），按每次分值折算次数
             const remain = Math.max(0, info.pc.max - info.pc.progress);
             // 单轮上限放宽到 25：60 分配额 / 每次 3 分需要 20 次，旧上限 15 会拆成两轮
-            const limit = Math.min(25, Math.max(1, Math.ceil(remain / perSearch)));
+            // PC 配额已满时 limit=0，直接跳过 PC 循环、只补手机端
+            const limit = pcDone ? 0 : Math.min(25, Math.max(1, Math.ceil(remain / perSearch)));
             const usedQueries = new Set();
             for (let i = 0; i < limit; i++) {
                 if (RewardsAuto.state.pcProgress >= RewardsAuto.state.pcMax) break;
@@ -3556,18 +3685,65 @@ Notice:
                     await Utils.delay(wait);
                 }
             }
+            // 手机端搜索补跑（v1.8.3）：UA 用 mobile、请求头 cookie 追加 _Rwho=u=m，
+            // 服务端才会把这次搜索计入 mobile 配额而不是 PC 配额。
+            if (mobMax > 0 && mobCur < mobMax) {
+                let mobProgress = mobCur;
+                const mobRemain = mobMax - mobCur;
+                const mobLimit = Math.min(10, Math.max(1, Math.ceil(mobRemain / perSearch)));
+                Utils.log("📱", `开始补跑手机端搜索 ${mobCur}/${mobMax}（计划 ${mobLimit} 次）`);
+                const mobQueries = new Set();
+                for (let i = 0; i < mobLimit; i++) {
+                    if (mobProgress >= mobMax) break;
+                    if (!this.touchRunLock()) throw new Error("RUN_LOCK_LOST");
+                    let query = "";
+                    for (let t = 0; t < 5 && (!query || mobQueries.has(query)); t++) {
+                        query = RewardsAuto.apiConfig.mode !== "offline"
+                            ? await API.getHotSearchWord()
+                            : RewardsAuto.searchPool[Utils.randomRange(0, RewardsAuto.searchPool.length - 1)];
+                    }
+                    if (!query || mobQueries.has(query)) continue;
+                    mobQueries.add(query);
+                    Utils.log("📱", `[手机] 搜索 ${i+1}/${mobLimit}: ${query}`);
+                    try {
+                        const html = await API.getSearchPage(query, true);
+                        if (html && /b_results|b_algo/i.test(html)) {
+                            const reported = await API.reportSearch(html, query, true);
+                            if (reported) {
+                                mobProgress += perSearch;
+                            } else {
+                                Utils.log("🟡", `手机端搜索上报未被接受（第 ${i+1}/${mobLimit} 次），跳过剩余手机搜索`);
+                                break;
+                            }
+                        } else {
+                            Utils.log("🟡", "手机端搜索页无结果内容，本次不计入进度");
+                        }
+                    } catch (e) {
+                        Utils.log("🟡", `手机端搜索失败: ${e.message}`);
+                    }
+                    if (i < mobLimit - 1 && mobProgress < mobMax) {
+                        const span = Number(GM_getValue("Config.span", 30));
+                        const wait = Utils.randomRange((span-15)*1000, (span+15)*1000);
+                        await Utils.delay(wait);
+                    }
+                }
+                Utils.log(mobProgress >= mobMax ? "✅" : "🟡", `手机端搜索本轮结束，估算进度 ${Math.min(mobProgress, mobMax)}/${mobMax}`);
+            }
+
             const finalInfo = await API.getRewardsInfo(3, true);
             if (finalInfo) {
+                const finalMob = finalInfo.mobile || { progress: 0, max: 0 };
+                const mobDoneFinal = !(Number(finalMob.max) > 0) || Number(finalMob.progress) >= Number(finalMob.max);
                 const pcDone2 = finalInfo.pc.progress >= finalInfo.pc.max;
-                if (pcDone2) {
+                if (pcDone2 && mobDoneFinal) {
                     this.searchDate = RewardsAuto.state.dateNowNum;
                     this.save();
                     RewardsAuto.state.restrictedTimes = 0;
                     GM_setValue("Config.restrictedTimes", 0);
                     GM_setValue("Config.lastSearchProgress", -1);
-                    GM_log(`🔵 🔍 搜索任务完成！PC: ${finalInfo.pc.progress}/${finalInfo.pc.max}`);
+                    GM_log(`🔵 🔍 搜索任务完成！PC: ${finalInfo.pc.progress}/${finalInfo.pc.max}${Number(finalMob.max) > 0 ? `，手机: ${finalMob.progress}/${finalMob.max}` : ""}`);
                 } else {
-                    Utils.log("🟡", `搜索已执行，配额未满 PC: ${finalInfo.pc.progress}/${finalInfo.pc.max}`);
+                    Utils.log("🟡", `搜索已执行，配额未满 PC: ${finalInfo.pc.progress}/${finalInfo.pc.max}${Number(finalMob.max) > 0 ? `，手机: ${finalMob.progress}/${finalMob.max}` : ""}`);
                 }
                 // 半程推送：搜索任务达到 50% 时当天推送一次
                 await this.notifyHalfIfNeeded(finalInfo);
