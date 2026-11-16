@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.5
+// @version      1.8.6
 // @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
@@ -844,55 +844,64 @@ Notice:
         },
         delay(ms) { return new Promise(r => setTimeout(r, ms)); },
         randomDelay(min = 3000, max = 8000) { return this.delay(this.randomRange(min, max)); },
-        waitForElement(selector, timeout = 30000) {
-            return new Promise((resolve, reject) => {
-                const element = document.querySelector(selector);
-                if (element) return resolve(element);
-                const observer = new MutationObserver((_, obs) => {
-                    const el = document.querySelector(selector);
-                    if (el) { obs.disconnect(); resolve(el); }
-                });
-                observer.observe(document.body, { childList: true, subtree: true });
-                setTimeout(() => {
-                    observer.disconnect();
-                    const el = document.querySelector(selector);
-                    el ? resolve(el) : reject(new Error(`等待元素超时: ${selector}`));
-                }, timeout);
-            });
-        },
-        waitForElementsByText(containerSelector, textPatterns, timeout = 30000) {
-            return new Promise((resolve, reject) => {
-                const findElements = () => {
-                    const containers = document.querySelectorAll(containerSelector);
-                    const results = [];
-                    for (const container of containers) {
-                        const text = container.textContent || "";
-                        for (const pattern of textPatterns) {
-                            if (text.includes(pattern)) {
-                                results.push({ element: container, pattern });
-                                break;
-                            }
-                        }
-                    }
-                    return results;
-                };
-                const found = findElements();
-                if (found.length > 0) return resolve(found);
-                const observer = new MutationObserver((_, obs) => {
-                    const found = findElements();
-                    if (found.length > 0) { obs.disconnect(); resolve(found); }
-                });
-                observer.observe(document.body, { childList: true, subtree: true });
-                setTimeout(() => {
-                    observer.disconnect();
-                    const found = findElements();
-                    found.length > 0 ? resolve(found) : reject(new Error("等待文本元素超时"));
-                }, timeout);
-            });
+        /**
+         * 从 RSC/HTML 文本里截出 `"key":{...}` 或 `"key":[...]` 的完整片段
+         * v1.8.6：统一了原先散落在 _fetchRewardsInfo / getServerStats 里的四份手写括号配平代码。
+         * @param {string} text 原始文本
+         * @param {string} key 字段名（不带引号）
+         * @param {number} [maxLen=20000] 最大扫描长度，防止异常文本拖死解析
+         * @returns {string|null} 片段原文，未命中返回 null
+         */
+        jsonBlock(text, key, maxLen = 20000) {
+            const found = new RegExp('"' + key + '"\\s*:\\s*').exec(text);
+            if (!found) return null;
+            let start = found.index + found[0].length;
+            while (start < text.length && /\s/.test(text[start])) start++;
+            const open = text[start];
+            if (open !== "{" && open !== "[") {
+                // 非对象/数组：退化为截到下一个逗号
+                const end = text.indexOf(",", start);
+                return text.slice(start, end === -1 ? Math.min(start + 120, text.length) : end).trim();
+            }
+            const close = open === "{" ? "}" : "]";
+            let depth = 0, inString = false, escaped = false;
+            for (let i = start; i < text.length && i - start < maxLen; i++) {
+                const ch = text[i];
+                if (inString) {
+                    if (escaped) escaped = false;
+                    else if (ch === "\\") escaped = true;
+                    else if (ch === "\"") inString = false;
+                    continue;
+                }
+                if (ch === "\"") { inString = true; continue; }
+                if (ch === open) depth++;
+                else if (ch === close && --depth === 0) return text.slice(start, i + 1);
+            }
+            return null;
         }
     };
 
     const API = {
+        /**
+         * 构造 DAPI 请求头（v1.8.6：原先 8 处调用各自手写同一份头，合并到此）
+         * @param {string} token Bearer token
+         * @param {string} [region="cn"] 国家码
+         * @param {boolean} [withPartner=false] 是否附带 x-rewards-partnerid: startapp
+         * @returns {Object} 请求头对象
+         */
+        dapiHeaders(token, region = "cn", withPartner = false) {
+            return {
+                "content-type": "application/json; charset=UTF-8",
+                "user-agent": RewardsAuto.ua.app,
+                "authorization": `Bearer ${token}`,
+                "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
+                "x-rewards-ismobile": "true",
+                "x-rewards-country": region,
+                "x-rewards-language": "zh",
+                ...(withPartner ? { "x-rewards-partnerid": "startapp" } : {})
+            };
+        },
+
         async getToken(url, maxRetries = 3) {
             const isCodeGrant = url.includes("grant_type=authorization_code");
             const sentCode = isCodeGrant ? Utils.extractAuthCode(url) : "";
@@ -1224,15 +1233,10 @@ Notice:
                     let earnedToday = null;
                     let searchQuotaFound = false;
                     let searchStep = 0;
-                    const pcIdx = clean.indexOf('"pointsCounters":{');
-                    if (pcIdx !== -1) {
-                        let start = pcIdx + 17, depth = 0, end = start;
-                        for (let i = start; i < clean.length && i < start + 500; i++) {
-                            if (clean[i] === '{') depth++;
-                            if (clean[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
-                        }
+                    const ptsStr = Utils.jsonBlock(clean, "pointsCounters", 500);
+                    if (ptsStr) {
                         try {
-                            const pts = JSON.parse(clean.substring(start, end));
+                            const pts = JSON.parse(ptsStr);
                             pcMax = pts.pc?.max ?? 60;
                             pcCur = pts.pc?.progress ?? 0;
                             mobMax = pts.mobile?.max ?? 0;
@@ -1244,29 +1248,19 @@ Notice:
                             }
                         } catch {}
                     }
-                    if (balance === 0) {
-                        const balMatch = clean.match(/"balance":(\d+)/) || clean.match(/"availablePoints":(\d+)/);
-                        if (balMatch) balance = parseInt(balMatch[1]);
-                    }
+                    const balMatch = clean.match(/"balance":(\d+)/) || clean.match(/"availablePoints":(\d+)/);
+                    if (balMatch) balance = parseInt(balMatch[1]);
                     const todayDetails = [];
-                    const acIdx = clean.indexOf('"activityCards":[');
-                    if (acIdx !== -1) {
-                        let acStart = acIdx + 16, acDepth = 0, acEnd = acStart;
-                        for (let i = acStart; i < clean.length && i < acStart + 5000; i++) {
-                            if (clean[i] === '[') acDepth++;
-                            if (clean[i] === ']') { acDepth--; if (acDepth === 0) { acEnd = i + 1; break; } }
+                    const cardsStr = Utils.jsonBlock(clean, "activityCards", 5000);
+                    if (cardsStr) {
+                        const cardRegex = /"title":"([^"]+)".*?"points":(\d+).*?"isCompleted":(true|false)/g;
+                        let cardMatch;
+                        while ((cardMatch = cardRegex.exec(cardsStr)) !== null) {
+                            const title = cardMatch[1];
+                            const points = parseInt(cardMatch[2]);
+                            const isCompleted = cardMatch[3] === "true";
+                            if (points > 0 && isCompleted) todayDetails.push({ title, points });
                         }
-                        try {
-                            const cardsStr = clean.substring(acStart, acEnd);
-                            const cardRegex = /"title":"([^"]+)".*?"points":(\d+).*?"isCompleted":(true|false)/g;
-                            let cardMatch;
-                            while ((cardMatch = cardRegex.exec(cardsStr)) !== null) {
-                                const title = cardMatch[1];
-                                const points = parseInt(cardMatch[2]);
-                                const isCompleted = cardMatch[3] === "true";
-                                if (points > 0 && isCompleted) todayDetails.push({ title, points });
-                            }
-                        } catch {}
                     }
                     const toNum = value => parseInt(String(value).replace(/,/g, ''), 10) || 0;
                     const searchRowMatch = clean.match(/<p>\s*必应搜索\s*<\/p>\s*<\/div>\s*<div(?=[^>]*justify-self-end)[^>]*>([\s\S]{0,500}?)<\/div>/i);
@@ -1302,16 +1296,10 @@ Notice:
                     }
                     const history = { month: 0, year: 0, lifetime: 0 };
                     let historyParsed = false;
-                    const histIdx = clean.search(/"pointsHistory"\s*:\s*\{/);
-                    if (histIdx !== -1) {
-                        const histStart = clean.indexOf('{', histIdx);
-                        let histDepth = 0, histEnd = histStart;
-                        for (let i = histStart; i < clean.length && i < histStart + 1200; i++) {
-                            if (clean[i] === '{') histDepth++;
-                            else if (clean[i] === '}') { histDepth--; if (histDepth === 0) { histEnd = i + 1; break; } }
-                        }
+                    const histStr = Utils.jsonBlock(clean, "pointsHistory", 1200);
+                    if (histStr) {
                         try {
-                            const hist = JSON.parse(clean.substring(histStart, histEnd));
+                            const hist = JSON.parse(histStr);
                             history.month = Number(hist.thisMonth?.earn) || 0;
                             history.year = Number(hist.thisYear?.earn) || 0;
                             history.lifetime = Number(hist.lifetime?.earn) || 0;
@@ -1319,18 +1307,15 @@ Notice:
                         } catch (_) {}
                     }
                     if (!historyParsed) {
-                        const monthHtmlMatch = clean.match(/本月.*?(\d[\d,]*)<\/div>/);
-                        const yearHtmlMatch = clean.match(/今年.*?(\d[\d,]*)<\/div>/);
-                        const lifetimeHtmlMatch = clean.match(/生存期.*?(\d[\d,]*)<\/div>/);
-                        const monthJsonMatch = clean.match(/"monthlyPoints":(\d+)/);
-                        const yearJsonMatch = clean.match(/"yearlyPoints":(\d+)/);
-                        const lifetimeJsonMatch = clean.match(/"lifetimePoints":(\d+)/);
-                        if (monthHtmlMatch) history.month = parseInt(monthHtmlMatch[1].replace(/,/g, ''));
-                        else if (monthJsonMatch) history.month = parseInt(monthJsonMatch[1]);
-                        if (yearHtmlMatch) history.year = parseInt(yearHtmlMatch[1].replace(/,/g, ''));
-                        else if (yearJsonMatch) history.year = parseInt(yearJsonMatch[1]);
-                        if (lifetimeHtmlMatch) history.lifetime = parseInt(lifetimeHtmlMatch[1].replace(/,/g, ''));
-                        else if (lifetimeJsonMatch) history.lifetime = parseInt(lifetimeJsonMatch[1]);
+                        const pick = (htmlRe, jsonRe) => {
+                            const htmlHit = clean.match(htmlRe);
+                            if (htmlHit) return parseInt(String(htmlHit[1]).replace(/,/g, ''), 10) || 0;
+                            const jsonHit = clean.match(jsonRe);
+                            return jsonHit ? parseInt(jsonHit[1], 10) || 0 : 0;
+                        };
+                        history.month = pick(/本月.*?(\d[\d,]*)<\/div>/, /"monthlyPoints":(\d+)/);
+                        history.year = pick(/今年.*?(\d[\d,]*)<\/div>/, /"yearlyPoints":(\d+)/);
+                        history.lifetime = pick(/生存期.*?(\d[\d,]*)<\/div>/, /"lifetimePoints":(\d+)/);
                     }
                     const base = { balance, earnedToday, pc: { progress: pcCur, max: pcMax, step: searchStep }, mobile: { progress: mobCur, max: mobMax }, dailyOffer, todayDetails, history };
                     if (!searchQuotaFound) {
@@ -1376,14 +1361,7 @@ Notice:
                     method: "POST",
                     url: "https://prod.rewardsplatform.microsoft.com/dapi/me/activities",
                     headers: {
-                        "content-type": "application/json; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": region,
-                        "x-rewards-language": "zh",
-                        "x-rewards-partnerid": "startapp",
+                        ...API.dapiHeaders(token, region, true),
                         "x-rewards-flights": "rwgobig"
                     },
                     data: JSON.stringify({
@@ -1491,43 +1469,6 @@ Notice:
             return -1;
         },
 
-        async appActivity(type, offerid) {
-            const region = GM_getValue("Config.lock", true) ? "cn" : RewardsAuto.state.region.toLowerCase();
-            const body = {
-                amount: 1, country: region,
-                id: Utils.getRandomUUID().replace(/-/g, '') + Utils.getRandomUUID().replace(/-/g, '').slice(0, 24),
-                type: type, channel: RewardsAuto.appConfig.channel
-            };
-            if (offerid) body.attributes = { offerid: offerid };
-            try {
-                const res = await this.withTokenRetry(token => Utils.xhr({
-                    method: "POST",
-                    url: "https://prod.rewardsplatform.microsoft.com/dapi/me/activities",
-                    headers: {
-                        "content-type": "application/json; charset=utf-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": region,
-                        "x-rewards-language": "zh"
-                    },
-                    data: JSON.stringify(body)
-                }));
-                if (Utils.isJSON(res)) {
-                    const data = JSON.parse(res);
-                    return {
-                        points: data.response?.activity?.p || 0,
-                        isDuplicate: data.response?.isDuplicate || false,
-                        balance: data.response?.balance || 0
-                    };
-                }
-            } catch (e) {
-                Utils.log("🔴", `App活动失败(${offerid}): ${e.message}`);
-            }
-            return null;
-        },
-
         /**
          * 获取 DAPI 任务列表（新版后台接口，任务数据最可靠）
          * @returns {Promise<Array|false>} 标准化任务数组，失败返回 false
@@ -1560,13 +1501,7 @@ Notice:
                 const res = await this.withTokenRetry(token => Utils.xhr({
                     url: "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=511",
                     headers: {
-                        "content-type": "application/json; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": "cn",
-                        "x-rewards-language": "zh"
+                        ...API.dapiHeaders(token, "cn", false)
                     }
                 }));
                 if (!Utils.isJSON(res)) return false;
@@ -1924,14 +1859,7 @@ Notice:
                     method: "POST",
                     url: "https://prod.rewardsplatform.microsoft.com/dapi/me/activities",
                     headers: {
-                        "content-type": "application/json; charset=utf-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": region,
-                        "x-rewards-language": "zh",
-                        "x-rewards-partnerid": "startapp"
+                        ...API.dapiHeaders(token, region, true)
                     },
                     data: JSON.stringify({
                         amount: 1,
@@ -1982,13 +1910,7 @@ Notice:
                 const res = await this.withTokenRetry(token => Utils.xhr({
                     url: "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=613",
                     headers: {
-                        "content-type": "application/json; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": "cn",
-                        "x-rewards-language": "zh"
+                        ...API.dapiHeaders(token, "cn", false)
                     }
                 }));
                 if (Utils.isJSON(res)) {
@@ -2010,25 +1932,6 @@ Notice:
                 Utils.log("🔴", `阅读进度获取失败: ${e.message}`);
             }
             return false;
-        },
-
-        async getRewardsToken(force = false) {
-            if (force) Utils.cacheDelete("rewardsToken");
-            return Utils.cached("rewardsToken", 10 * 60 * 1000, async () => {
-                try {
-                    const html = await Utils.xhr({
-                        url: "https://rewards.bing.com/",
-                        headers: { "user-agent": RewardsAuto.ua.pc, "referer": "https://rewards.bing.com/" }
-                    });
-                    if (html) {
-                        const match = html.replace(/\s/g, "").match(/RequestVerificationToken(.*?)value="(.*?)"/);
-                        if (match) return match[2];
-                    }
-                } catch (e) {
-                    Utils.log("🟡", `RequestVerificationToken 获取失败: ${e.message}`);
-                }
-                return false;
-            });
         },
 
         /**
@@ -2103,13 +2006,7 @@ Notice:
                 const res = await this.withTokenRetry(token => Utils.xhr({
                     url: "https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=105",
                     headers: {
-                        "content-type": "application/json; charset=UTF-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": "cn",
-                        "x-rewards-language": "zh"
+                        ...API.dapiHeaders(token, "cn", false)
                     }
                 }));
                 if (Utils.isJSON(res)) {
@@ -2136,13 +2033,7 @@ Notice:
                     method: "POST",
                     url: "https://prod.rewardsplatform.microsoft.com/dapi/me/activities",
                     headers: {
-                        "content-type": "application/json; charset=utf-8",
-                        "user-agent": RewardsAuto.ua.app,
-                        "authorization": `Bearer ${token}`,
-                        "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                        "x-rewards-ismobile": "true",
-                        "x-rewards-country": region,
-                        "x-rewards-language": "zh"
+                        ...API.dapiHeaders(token, region, false)
                     },
                     data: JSON.stringify({
                         amount: 1, country: region, id: id, type: 101,
@@ -2451,22 +2342,6 @@ Notice:
         },
 
         /**
-         * 兼容旧调用：返回 reportActivity 的 action id
-         */
-        async getNextActionHash(html) {
-            const actions = await this.resolveServerActions(html);
-            return actions.reportActivity || GM_getValue("Config.nextAction", "707e6eb15bdfdd5fba193f0a77e934f7018faf87ce");
-        },
-
-        /**
-         * 判断一张卡是不是「接口做不到、只能人工」的类型（v1.8.0）
-         * 结论来自两处实测：①社区脚本 ref-8787 的注释——只调面板接口对 Quiz 卡无效，
-         * 必须真在落地页点掉答案，页面才会带 WQOskey/WQId/WQQI 去上报；
-         * ②+10 带锁拼图（VerB_Locked_level2）同样必须真人拼完。
-         * @param {Object} card 卡片对象（来自 earn 页或 DAPI）
-         * @returns {string} 跳过原因；空字符串表示可以尝试自动完成
-         */
-        /**
          * 判断这张卡是否属于「需 App 内搜索」类型（form=ML2W4J / ML2Y2H 的 Bing 搜索卡）
          * 说明：v1.8.3 起不再直接跳过这类卡，改为以移动端身份真实搜索一次再上报，
          *      见 _claimCard 的策略 -1。
@@ -2481,6 +2356,14 @@ Notice:
             return /(^|[?&])form=(ML2W4J|ML2Y2H)(&|$)/i.test(dest);
         },
 
+        /**
+         * 判断一张卡是不是「接口做不到、只能人工」的类型（v1.8.0）
+         * 结论来自两处实测：①社区脚本 ref-8787 的注释——只调面板接口对 Quiz 卡无效，
+         * 必须真在落地页点掉答案，页面才会带 WQOskey/WQId/WQQI 去上报；
+         * ②+10 带锁拼图（VerB_Locked_level2）同样必须真人拼完。
+         * @param {Object} card 卡片对象（来自 earn 页或 DAPI）
+         * @returns {string} 跳过原因；空字符串表示可以尝试自动完成
+         */
         _cardBlockReason(card) {
             const text = `${card.offerId || ""} ${card.title || ""} ${card.destination || ""}`;
             if (card.kind === "quiz" || /quiz|BingQA_Quiz|Homepage%20quiz|form=ML2BF1/i.test(text)) {
@@ -2595,14 +2478,7 @@ Notice:
                         method: "POST",
                         url: "https://prod.rewardsplatform.microsoft.com/dapi/me/activities",
                         headers: {
-                            "content-type": "application/json; charset=utf-8",
-                            "user-agent": RewardsAuto.ua.app,
-                            "authorization": `Bearer ${token}`,
-                            "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                            "x-rewards-ismobile": "true",
-                            "x-rewards-country": region,
-                            "x-rewards-language": "zh",
-                            "x-rewards-partnerid": "startapp"
+                            ...API.dapiHeaders(token, region, true)
                         },
                         data: JSON.stringify({
                             amount: 1,
@@ -3124,7 +3000,9 @@ Notice:
             //        同样重置一次，让当天被旧逻辑标记过的卡再试一遍
             // v1.8.5 只做排障增强（保留服务端响应体 / 连接层详情 / 连续失败熔断），业务语义未变；
             //        这里的重置只清「当日尝试计数」，不含「已完成」标记，重复执行无副作用
-            const engineVersion = "1.8.5";
+            // v1.8.6 是纯代码整理（删死代码 / 合并重复解析与请求头），不改任何业务判定；
+            //        保留同一重置逻辑，重复执行无副作用
+            const engineVersion = "1.8.6";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -4688,32 +4566,7 @@ Notice:
          * @param {string} key JSON 键名
          * @returns {string|null} 片段原文
          */
-        const grabBlock = (text, key) => {
-            const idx = text.indexOf(`"${key}":`);
-            if (idx === -1) return null;
-            let start = idx + key.length + 3;
-            while (start < text.length && /\s/.test(text[start])) start++;
-            const open = text[start];
-            if (open !== "{" && open !== "[") {
-                const end = text.indexOf(",", start);
-                return text.slice(start, end === -1 ? Math.min(start + 120, text.length) : end).trim();
-            }
-            const close = open === "{" ? "}" : "]";
-            let depth = 0, inString = false, escaped = false;
-            for (let i = start; i < text.length; i++) {
-                const ch = text[i];
-                if (inString) {
-                    if (escaped) escaped = false;
-                    else if (ch === "\\") escaped = true;
-                    else if (ch === '"') inString = false;
-                    continue;
-                }
-                if (ch === '"') { inString = true; continue; }
-                if (ch === open) depth++;
-                else if (ch === close && --depth === 0) return text.slice(start, i + 1);
-            }
-            return null;
-        };
+        const grabBlock = (text, key) => Utils.jsonBlock(text, key);
         /**
          * 解析 JSON 片段，失败时返回原文样本
          * @param {string|null} raw 片段原文
@@ -4754,13 +4607,7 @@ Notice:
             const res = await API.withTokenRetry(token => Utils.xhr({
                 url: `https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=${options}`,
                 headers: {
-                    "content-type": "application/json; charset=UTF-8",
-                    "user-agent": RewardsAuto.ua.app,
-                    "authorization": `Bearer ${token}`,
-                    "x-rewards-appid": RewardsAuto.appConfig.rewardsAppId,
-                    "x-rewards-ismobile": "true",
-                    "x-rewards-country": "cn",
-                    "x-rewards-language": "zh"
+                    ...API.dapiHeaders(token, "cn", false)
                 }
             }));
             if (!Utils.isJSON(res)) return { error: "非 JSON 响应", sample: String(res).slice(0, 300) };
