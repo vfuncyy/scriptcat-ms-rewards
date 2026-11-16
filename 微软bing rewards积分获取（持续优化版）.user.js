@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      2.0.0
-// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；v2.0 全新暗色控制台面板，把运行状态、调试信息、诊断数据统一成可视化界面；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
+// @version      2.1.0
+// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；v2.1 暗色控制台面板：手动授权 / 兑换授权码 / 运行状态 / 立即运行 / PushPlus / 诊断信息 六个菜单项都改成可视化面板，均带表单与提示条；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
 // @crontab      */20 * * * *
@@ -502,7 +502,18 @@ Notice:
 .rawbox[open]>summary::before{content:"▾ ";}
 textarea{width:100%;height:32vh;resize:vertical;font:12px/1.6 var(--pc-mono);color:var(--pc-fg);background:rgba(2,6,23,.55);border:1px solid var(--pc-border);border-radius:6px;padding:8px;white-space:pre;tab-size:2;}
 .note{margin:10px 14px 0;padding:6px 9px;font-size:12px;color:var(--pc-fg);background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.28);border-radius:6px;word-break:break-word;}
-.ft{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--pc-border);background:rgba(15,23,42,.6);}
+.fields{display:flex;flex-direction:column;gap:11px;padding:12px 14px 4px;}
+.field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--pc-muted);}
+.field.is-check{flex-direction:row;align-items:center;gap:8px;cursor:pointer;color:var(--pc-fg);font-size:13px;}
+.field .lab{letter-spacing:.02em;}
+.field .hintline{font-size:11px;line-height:1.5;color:var(--pc-muted);}
+.field .field-input{width:100%;font:12px/1.6 var(--pc-mono);color:var(--pc-fg);background:rgba(2,6,23,.55);border:1px solid var(--pc-border);border-radius:6px;padding:7px 9px;}
+.field textarea.field-input{height:auto;min-height:64px;resize:vertical;white-space:pre-wrap;word-break:break-all;tab-size:2;}
+.field input[type="checkbox"]{width:15px;height:15px;margin:0;accent-color:var(--pc-accent);cursor:pointer;}
+.field .field-input::placeholder{color:#64748b;}
+.field .field-input:focus-visible{outline:2px solid var(--pc-ring);outline-offset:1px;border-color:var(--pc-ring);}
+.note[hidden]{display:none;}
+.ft{display:flex
 button{font:inherit;font-size:13px;padding:7px 13px;border-radius:6px;border:1px solid var(--pc-border);background:var(--pc-surface-2);color:var(--pc-fg);cursor:pointer;transition:background 150ms ease,border-color 150ms ease,transform 80ms ease;white-space:nowrap;}
 button:hover{background:#3d4b61;}
 button:active{transform:translateY(1px);}
@@ -646,13 +657,10 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
             const body = el("div", "body");
             const statsEl = el("div", "stats");
             const noteEl = el("div", "note");
-            if (opts.note) {
-                noteEl.textContent = opts.note;
-                card.append(hd, noteEl, body);
-            } else {
-                noteEl.style.display = "none";
-                card.append(hd, body);
-            }
+            // 提示条始终挂在 DOM 上：setNote 之后可以重新显示，避免「面板建好才想补提示」无从下手
+            if (opts.note) noteEl.textContent = opts.note;
+            else noteEl.hidden = true;
+            card.append(hd, noteEl, body);
             // 指标条
             if (Array.isArray(opts.stats) && opts.stats.length) {
                 opts.stats.forEach((item) => {
@@ -681,6 +689,61 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
             rowsSec.append(rowsTitle, rowsCount);
             const rowsList = el("ul", "rows");
             rowsWrap.append(rowsSec, rowsList);
+            // 表单字段（配置类面板：单行输入 / 密码 / 多行文本 / 开关）
+            const fieldsWrap = el("div", "fields");
+            /** 字段 key -> 输入元素 */
+            const fieldEls = Object.create(null);
+            /**
+             * 渲染表单字段
+             * @param {Array<Object>} fields 字段描述 {type,key,label,value,placeholder,hint,rows}
+             */
+            const renderFields = (fields) => {
+                const list = Array.isArray(fields) ? fields : [];
+                Object.keys(fieldEls).forEach((k) => { delete fieldEls[k]; });
+                fieldsWrap.textContent = "";
+                if (!list.length) { fieldsWrap.remove(); return; }
+                list.forEach((field, i) => {
+                    const key = String(field.key || `f${i}`);
+                    const isCheck = field.type === "checkbox";
+                    const row = el("label", isCheck ? "field is-check" : "field");
+                    let input;
+                    if (isCheck) {
+                        input = document.createElement("input");
+                        input.type = "checkbox";
+                        input.checked = Boolean(field.value);
+                    } else if (field.type === "textarea") {
+                        input = document.createElement("textarea");
+                        input.className = "field-input";
+                        input.rows = Number(field.rows) > 0 ? Number(field.rows) : 3;
+                        input.value = field.value === undefined || field.value === null ? "" : String(field.value);
+                        if (field.placeholder) input.placeholder = String(field.placeholder);
+                    } else {
+                        input = document.createElement("input");
+                        input.type = field.type === "password" ? "password" : "text";
+                        input.className = "field-input";
+                        input.value = field.value === undefined || field.value === null ? "" : String(field.value);
+                        if (field.placeholder) input.placeholder = String(field.placeholder);
+                    }
+                    if (!isCheck) input.autocomplete = "off";
+                    fieldEls[key] = input;
+                    const lab = el("span", "lab");
+                    lab.textContent = field.label || key;
+                    if (isCheck) row.append(input, lab);
+                    else row.append(lab, input);
+                    if (field.hint) {
+                        const tip = el("span", "hintline");
+                        tip.textContent = String(field.hint);
+                        row.append(tip);
+                    }
+                    fieldsWrap.append(row);
+                });
+                // 字段区放在滚动区顶部；若已有任务行，插在行区上方
+                if (!fieldsWrap.isConnected) {
+                    if (rowsWrap.isConnected) body.insertBefore(fieldsWrap, rowsWrap);
+                    else body.insertBefore(fieldsWrap, body.firstChild);
+                }
+            };
+            if (Array.isArray(opts.fields)) renderFields(opts.fields);
             /**
              * 渲染任务行
              * @param {Array<Object>} rows 任务行数据
@@ -706,7 +769,9 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
                 rowsCount.textContent = `${okCount} / ${list.length}`;
                 // 只在首次渲染时挂载到 body 顶部；重复 setRows 不再移动节点
                 if (list.length && !rowsWrap.isConnected) {
-                    body.insertBefore(rowsWrap, body.firstChild);
+                    // 字段区优先：任务行永远排在表单字段之后
+                    if (fieldsWrap.isConnected) body.insertBefore(rowsWrap, fieldsWrap.nextSibling);
+                    else body.insertBefore(rowsWrap, body.firstChild);
                 }
                 if (!list.length) rowsWrap.remove();
             };
@@ -749,7 +814,16 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
                 const btn = el("button", action.primary ? "primary" : "");
                 btn.type = "button";
                 btn.textContent = action.label;
-                btn.onclick = () => { if (action.onClick) action.onClick(area, close); else close(); };
+                btn.onclick = () => {
+                    if (!action.onClick) { close(); return; }
+                    try {
+                        const ret = action.onClick(area, close, fieldApi);
+                        // 允许 action 写成 async：异常统一落到提示条，不让它变成未处理拒绝
+                        if (ret && typeof ret.catch === "function") ret.catch((e) => fieldApi.setNote(`⚠️ ${e.message}`));
+                    } catch (e) {
+                        fieldApi.setNote(`⚠️ ${e.message}`);
+                    }
+                };
                 ft.append(btn);
             });
             const hint = el("span", "hint");
@@ -761,6 +835,48 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
             /**
              * 关闭并清理面板
              */
+            /** 面板内部 API：按钮回调读写字段与提示条，避免每个入口各查一遍 DOM */
+            const fieldApi = {
+                /**
+                 * 读取全部字段当前值
+                 * @returns {Object} key -> string|boolean
+                 */
+                values: () => {
+                    const out = {};
+                    Object.keys(fieldEls).forEach((k) => {
+                        const input = fieldEls[k];
+                        if (!input) return;
+                        out[k] = input.type === "checkbox" ? input.checked : input.value;
+                    });
+                    return out;
+                },
+                /**
+                 * 设置单个字段值
+                 * @param {string} key 字段名
+                 * @param {string|boolean} value 新值
+                 */
+                setValue: (key, value) => {
+                    const input = fieldEls[key];
+                    if (!input) return;
+                    if (input.type === "checkbox") input.checked = Boolean(value);
+                    else input.value = value === undefined || value === null ? "" : String(value);
+                },
+                /**
+                 * 聚焦指定字段
+                 * @param {string} key 字段名
+                 */
+                focusField: (key) => {
+                    const input = fieldEls[key];
+                    if (input && typeof input.focus === "function") input.focus();
+                },
+                setNote: (text) => {
+                    const str = text === undefined || text === null ? "" : String(text);
+                    noteEl.textContent = str;
+                    noteEl.hidden = !str;
+                },
+                setFields: (fields) => { renderFields(fields); },
+                close: () => close()
+            };
             const close = () => {
                 try { document.removeEventListener("keydown", onKey, true); } catch (_) {}
                 try { hostEl.remove(); } catch (_) {}
@@ -798,8 +914,15 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
                         box.append(k, v);
                         statsEl.append(box);
                     });
-                    if (!statsEl.parentNode) body.prepend(statsEl);
+                    // 指标条必须挂在滚动区之外（card 直接子节点），否则滚动任务行时数值会滚走
+                    if (!statsEl.isConnected && card.contains(body)) card.insertBefore(statsEl, body);
                 },
+                setNote: (text) => {
+                    const str = text === undefined || text === null ? "" : String(text);
+                    noteEl.textContent = str;
+                    noteEl.hidden = !str;
+                },
+                setFields: (fields) => { renderFields(fields); },
                 appendLog: (line) => {
                     const text = logEl.textContent ? `${logEl.textContent}\n${line}` : String(line);
                     logEl.textContent = text;
@@ -3287,7 +3410,7 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
             // v1.8.6 是纯代码整理（删死代码 / 合并重复解析与请求头），不改任何业务判定；
             // v2.0.0 移除了桌面应用周任务（服务端不认网页身份交卷）与面板死代码，
             //        业务判定同样未变，沿用同一重置逻辑，重复执行无副作用
-            const engineVersion = "2.0.0";
+            const engineVersion = "2.1.0";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
                 this.dailySetDate = 0;
@@ -4232,7 +4355,41 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
     };
 
     GM_registerMenuCommand("🔑 手动授权", () => {
-        GM_openInTab("https://login.live.com/oauth20_authorize.srf?client_id=0000000040170455&response_type=code&scope=service::prod.rewardsplatform.microsoft.com::MBI_SSL&redirect_uri=https://login.live.com/oauth20_desktop.srf", { active: true });
+        const authUrl = "https://login.live.com/oauth20_authorize.srf?client_id=0000000040170455&response_type=code&scope=service::prod.rewardsplatform.microsoft.com::MBI_SSL&redirect_uri=https://login.live.com/oauth20_desktop.srf";
+        const panel = Utils.showPanel({
+            title: "手动授权",
+            meta: `v${GM_info.script.version}`,
+            note: "登录并同意后，地址栏会跳到 oauth20_desktop.srf?code=... 的地址；整段复制，再用「📋 粘贴/兑换授权码」兑换成 Token",
+            logTitle: "步骤",
+            log: [
+                "1  打开授权页面，登录自己的微软账号",
+                "2  同意 Rewards 授权，等地址栏跳到 oauth20_desktop.srf?code=...",
+                "3  复制整段地址（或只复制 code 后面的部分）",
+                "4  回到脚本菜单 →「📋 粘贴/兑换授权码」粘贴并兑换"
+            ],
+            text: authUrl,
+            textTitle: "授权链接（可复制）",
+            actions: [
+                {
+                    label: "打开授权页面",
+                    primary: true,
+                    onClick: (area, close) => {
+                        GM_openInTab(authUrl, { active: true });
+                        close();
+                    }
+                },
+                {
+                    label: "复制链接",
+                    onClick: (area, close, api) => {
+                        Utils.copyText(authUrl);
+                        api.setNote("✅ 授权链接已复制，粘贴到浏览器地址栏即可打开");
+                    }
+                },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 后台上下文拿不到 DOM：退回直接开标签页
+        if (!panel) GM_openInTab(authUrl, { active: true });
     });
 
     /**
@@ -4277,22 +4434,6 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
         return { ok, concurrentOk, hint };
     }
 
-    /**
-     * 兑换并打印结果（菜单场景统一入口）
-     * @param {string} code 授权码
-     * @param {string} okText 成功提示文案
-     */
-    async function exchangeAndReport(code, okText = "🎉 Token获取成功！授权已完成") {
-        const res = await exchangeAuthCode(code);
-        if (res.ok) {
-            Utils.safeAlert(okText);
-        } else if (res.concurrentOk) {
-            Utils.safeAlert("🎉 Token已由其他上下文获取成功！授权已完成");
-        } else {
-            Utils.safeAlert(`⚠️ Token获取失败${res.hint}\n请重新点击「🔑 手动授权」并粘贴最新的跳转URL`);
-        }
-        return res;
-    }
 
     /**
      * 面板/设置页写入授权码后的即时兑换
@@ -4345,55 +4486,93 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
         }
     } catch (_) {}
 
-    GM_registerMenuCommand("📋 粘贴/兑换授权码", async () => {
-        const input = Utils.safePrompt(
-            "粘贴授权页面跳转后的完整URL（或直接粘贴授权码）:\n\n"
-            + "· 留空确定 = 使用设置面板里已填的「授权码链接」\n"
-            + "· 取消 = 不做任何操作"
-        );
-        // 取消：safePrompt 返回 null
-        if (input === null || input === undefined) return;
-        const typed = String(input).trim();
-
-        // 留空分支：等价于原「⚡ 兑换面板授权码」，读取设置面板里填写的内容
-        if (!typed) {
-            const panelRaw = String(GM_getValue("Config.code", "") || "").trim();
-            if (!panelRaw) {
-                Utils.safeAlert("⚠️ 设置面板里的「授权码链接」也是空的。\n请先点击「🔑 手动授权」，把跳转后的完整网址粘进弹窗或设置面板。");
-                return;
-            }
-            const panelCode = Utils.extractAuthCode(panelRaw);
-            if (!panelCode) {
-                Utils.safeAlert("⚠️ 面板里的内容不是有效授权码。\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转网址。");
-                return;
-            }
-            // 手动触发的兑换不受 codeClaim 限制（用户明确要求重试）
-            GM_setValue("Config.codeClaim", panelCode);
-            Utils.safeAlert("✅ 已读取面板授权码，正在兑换 Token...");
-            try {
-                const res = await exchangeAndReport(panelCode, "🎉 面板授权码兑换成功，授权已完成");
-                // 兑换成功后清掉面板里的码，避免下一轮定时把一次性码再兑换一次
-                if ((res.ok || res.concurrentOk) && String(GM_getValue("Config.code", "") || "").trim() === panelRaw) {
-                    GM_setValue("Config.code", "");
+    GM_registerMenuCommand("📋 粘贴/兑换授权码", () => {
+        const savedRaw = String(GM_getValue("Config.code", "") || "").trim();
+        const panel = Utils.showPanel({
+            title: "粘贴/兑换授权码",
+            meta: `v${GM_info.script.version}`,
+            note: savedRaw
+                ? "设置面板里已填了「授权码链接」：输入框留空直接点「兑换」就用它"
+                : "把授权页面跳转后的完整网址粘贴到下面；还没授权就先点「🔑 手动授权」走一遍",
+            fields: [
+                {
+                    type: "textarea",
+                    key: "code",
+                    label: "授权页面跳转后的完整网址 / 授权码",
+                    value: "",
+                    placeholder: "https://login.live.com/oauth20_desktop.srf?code=M.C5_BAY...",
+                    hint: "留空 = 使用设置面板里已填的「授权码链接」"
                 }
-            } catch (e) {
-                Utils.safeAlert(`⚠️ 兑换出错: ${e.message}`);
+            ],
+            actions: [
+                {
+                    label: "兑换",
+                    primary: true,
+                    onClick: async (area, close, api) => {
+                        const typed = String(api.values().code || "").trim();
+                        const raw = typed || savedRaw;
+                        if (!raw) {
+                            api.setNote("⚠️ 输入框和设置面板里的授权码都是空的，请先点「🔑 手动授权」拿到跳转网址");
+                            return;
+                        }
+                        const code = Utils.extractAuthCode(raw);
+                        if (!code) {
+                            api.setNote("⚠️ 未识别到有效授权码，需要 oauth20_desktop.srf?code=... 格式的完整网址");
+                            return;
+                        }
+                        api.setNote("正在兑换 Token…");
+                        try {
+                            // 手动触发的兑换不受 codeClaim 限制（用户明确要求重试）
+                            GM_setValue("Config.codeClaim", code);
+                            const res = await exchangeAuthCode(code);
+                            if (res.ok || res.concurrentOk) {
+                                // 兑换成功后清掉设置面板里的码，避免下一轮定时把一次性码再兑换一次
+                                if (savedRaw && String(GM_getValue("Config.code", "") || "").trim() === savedRaw) {
+                                    GM_setValue("Config.code", "");
+                                }
+                                api.setNote(res.ok ? "🎉 Token 获取成功，授权已完成" : "🎉 Token 已由其他上下文获取成功，授权已完成");
+                            } else {
+                                api.setNote(`⚠️ Token 获取失败${res.hint}\n请重新点「🔑 手动授权」并粘贴最新的跳转网址`);
+                            }
+                        } catch (e) {
+                            api.setNote(`⚠️ 兑换出错: ${e.message}`);
+                        }
+                    }
+                },
+                {
+                    label: "清空输入",
+                    onClick: (area, close, api) => {
+                        api.setValue("code", "");
+                        api.focusField("code");
+                    }
+                },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 后台上下文拿不到 DOM：退回原生输入框
+        if (!panel) {
+            const input = Utils.safePrompt(
+                "粘贴授权页面跳转后的完整URL（或直接粘贴授权码）：\n\n"
+                + "· 留空确定 = 使用设置面板里已填的「授权码链接」\n"
+                + "· 取消 = 不做任何操作"
+            );
+            if (input === null || input === undefined) return;
+            const raw = String(input).trim() || savedRaw;
+            const code = Utils.extractAuthCode(raw);
+            if (!code) {
+                Utils.safeAlert("⚠️ 未识别到有效授权码。\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转网址。");
+                return;
             }
-            return;
-        }
-
-        const code = Utils.extractAuthCode(typed);
-        if (!code) {
-            Utils.safeAlert("⚠️ 未识别到有效授权码！\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转URL。");
-            return;
-        }
-        // 不把授权码写入共享存储，避免定时轮询/其他页面抢先把同一码兑换掉。
-        // 旧 refresh_token 也不在这里删除：新码失败时仍可回退到旧 token。
-        Utils.safeAlert("✅ 授权码已识别，正在尝试获取 Token...");
-        try {
-            await exchangeAndReport(code);
-        } catch (e) {
-            Utils.safeAlert(`⚠️ Token获取出错: ${e.message}`);
+            exchangeAuthCode(code).then((res) => {
+                if (res.ok || res.concurrentOk) {
+                    if (savedRaw && String(GM_getValue("Config.code", "") || "").trim() === savedRaw) {
+                        GM_setValue("Config.code", "");
+                    }
+                    Utils.safeAlert(res.ok ? "🎉 Token获取成功！授权已完成" : "🎉 Token已由其他上下文获取成功！授权已完成");
+                } else {
+                    Utils.safeAlert(`⚠️ Token获取失败${res.hint}\n请重新点击「🔑 手动授权」并粘贴最新的跳转URL`);
+                }
+            }).catch((e) => Utils.safeAlert(`⚠️ 兑换出错: ${e.message}`));
         }
     });
 
@@ -4490,77 +4669,133 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
     });
 
     // v1.8.1：去掉「忽略次日锁定」——跨日跳过逻辑已在 v1.8.0 删除，标签留着会误导
+    const runNow = () => TaskManager.runAll(true).catch(e => Utils.log("🔴", `手动运行失败: ${e.message}`));
     GM_registerMenuCommand("🚀 立即运行", () => {
-        TaskManager.runAll(true).catch(e => Utils.log("🔴", `手动运行失败: ${e.message}`));
+        const panel = Utils.showPanel({
+            title: "立即运行",
+            meta: `v${GM_info.script.version}`,
+            note: "在后台跑一轮完整任务，不打开多余标签页；执行进度与结果可在「📊 运行状态」里查看",
+            logTitle: "本轮顺序",
+            log: [
+                "1  预检 · 地区与 Token",
+                "2  签到（PC / App）",
+                "3  阅读 · PC 搜索",
+                "4  活动卡片 · 任务卡 · 每日活动",
+                "5  连签检测 · 待领取积分 · 日报推送"
+            ],
+            actions: [
+                { label: "开始运行", primary: true, onClick: (area, close) => { close(); runNow(); } },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 后台上下文拿不到 DOM：直接开跑，行为与旧版一致
+        if (!panel) runNow();
     });
 
-    GM_registerMenuCommand("🔔 配置 PushPlus 推送", () => {
-        /**
-         * 直接读写与 UserConfig 面板同一批存储键，
-         * 面板和菜单改的是同一份数据，不会出现“面板填了但脚本读不到”
-         */
-        const cfg = PushPlus.read();
-        const lines = [
-            "📲 PushPlus 微信推送配置",
-            "==================",
-            "",
-            `PushPlus Token: ${cfg.token ? "已配置" : "（空）"}`,
-            "   说明: 微信扫码登录 pushplus.plus，首页即可获取 token",
-            "",
-            `PushPlus 推送开关: ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}`,
-            `浏览器通知: ${GM_getValue("Notice.bro", true) ? "✅ 开启" : "❌ 关闭"}（用菜单「🔕/🔔」切换）`,
-            "",
-            `实际推送目标: ${PushPlus.ready() ? "PushPlus（微信）" : "仅浏览器通知"}`,
-            "",
-            "输入 1 配置 Token，输入 2 切换推送开关，输入 3 发送测试消息，输入 9 清空 Token，输入 0 退出："
+    /**
+     * 发送一条测试通知（浏览器通知 + PushPlus），面板与后台兜底共用
+     * @returns {string[]} 结果说明行
+     */
+    function sendTestNotification() {
+        const testText = "🧪 这是一条测试消息\n如果你看到这条消息，说明通知接口配置成功！";
+        RewardsAuto.state.sendMSG = testText;
+        try { GM_log("📢", testText); } catch (_) {}
+        if (GM_getValue("Notice.bro", true)) {
+            try { GM_notification({ title: GM_info.script.name, text: testText }); } catch (_) {}
+        }
+        const nowCfg = PushPlus.read();
+        if (PushPlus.ready()) Utils.sendPushPlus();
+        return [
+            `浏览器通知: ${GM_getValue("Notice.bro", true) ? "已发送" : "已关闭"}`,
+            `PushPlus 微信推送: ${PushPlus.ready() ? "已发送（结果见脚本日志）" : (nowCfg.enabled ? "未配置 Token" : "已关闭")}`
         ];
-        const choice = Utils.safePrompt(lines.join("\n"));
-        if (!choice) return;
-        const num = parseInt(choice);
-        if (num === 0) return;
-        if (num === 1) {
-            const current = String(GM_getValue("Notice.pushplusToken", "") || "");
-            const next = Utils.safePrompt(`配置 PushPlus Token\n\n微信扫码登录 pushplus.plus 后，首页即可获取自己的 token。\n\n当前值: ${current ? "已配置" : "(空)"}\n\n请输入新的值（留空即清除）：`, current);
-            if (next === null) return;
-            GM_setValue("Notice.pushplusToken", next.trim());
-            Utils.safeAlert(`PushPlus Token 已${next.trim() ? "保存" : "清除"}！`);
-            return;
-        }
-        if (num === 2) {
-            GM_setValue("Notice.pushplus", !cfg.enabled);
-            Utils.safeAlert(`PushPlus 推送已${!cfg.enabled ? "开启" : "关闭"}！`);
-            return;
-        }
-        if (num === 3) {
-            // v1.8.1：原「📢 测试通知」并入此处；同时修掉一个老问题——
-            // 旧写法先设 state.sendMSG 再调 Utils.log(…, true)，而 log 内部会用 `${icon} ${msg}`
-            // 覆盖 sendMSG，导致推出去的是「📢 测试通知已发送」而不是自定义测试文案
-            const testText = "🧪 这是一条测试消息\n如果你看到这条消息，说明通知接口配置成功！";
-            RewardsAuto.state.sendMSG = testText;
-            try { GM_log("📢", testText); } catch (_) {}
-            if (GM_getValue("Notice.bro", true)) {
-                try { GM_notification({ title: GM_info.script.name, text: testText }); } catch (_) {}
+    }
+
+    GM_registerMenuCommand("🔔 配置 PushPlus 推送", () => {
+        const cfg = PushPlus.read();
+        // 汇总一行，保存/测试后回填到提示条，省得用户再去日志里确认
+        const summary = () => {
+            const now = PushPlus.read();
+            return `${now.token ? "Token 已配置" : "尚未配置 Token（微信扫码登录 pushplus.plus，首页即可获取）"} · 推送${now.enabled ? "已开启" : "已关闭"} · 实际推送目标 ${PushPlus.ready() ? "PushPlus（微信）+ 浏览器通知" : "仅浏览器通知"}`;
+        };
+        const panel = Utils.showPanel({
+            title: "PushPlus 推送配置",
+            meta: `v${GM_info.script.version}`,
+            note: summary(),
+            fields: [
+                { type: "checkbox", key: "enabled", label: "开启 PushPlus 微信推送", value: cfg.enabled },
+                {
+                    type: "password",
+                    key: "token",
+                    label: "PushPlus Token",
+                    value: cfg.token,
+                    placeholder: "粘贴 pushplus.plus 首页的 token",
+                    hint: "留空保存 = 清除 Token，只保留浏览器通知"
+                }
+            ],
+            actions: [
+                {
+                    label: "保存",
+                    primary: true,
+                    onClick: (area, close, api) => {
+                        const v = api.values();
+                        GM_setValue("Notice.pushplus", Boolean(v.enabled));
+                        GM_setValue("Notice.pushplusToken", String(v.token || "").trim());
+                        api.setNote(`✅ 已保存 · ${summary()}`);
+                    }
+                },
+                {
+                    label: "发送测试",
+                    onClick: (area, close, api) => {
+                        const v = api.values();
+                        GM_setValue("Notice.pushplus", Boolean(v.enabled));
+                        GM_setValue("Notice.pushplusToken", String(v.token || "").trim());
+                        api.setNote(`📢 测试消息已发出 · ${sendTestNotification().join(" · ")}`);
+                    }
+                },
+                {
+                    label: "清空 Token",
+                    onClick: (area, close, api) => {
+                        api.setValue("token", "");
+                        GM_setValue("Notice.pushplusToken", "");
+                        api.setNote("已清空 Token，当前只保留浏览器通知；重新粘贴后再点「保存」即可恢复");
+                    }
+                },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 后台上下文拿不到 DOM：退回原生输入框，行为与旧版一致
+        if (!panel) {
+            const choice = Utils.safePrompt([
+                "📲 PushPlus 微信推送配置",
+                "",
+                `PushPlus Token: ${cfg.token ? "已配置" : "（空）"}`,
+                `PushPlus 推送开关: ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}`,
+                `浏览器通知: ${GM_getValue("Notice.bro", true) ? "✅ 开启" : "❌ 关闭"}`,
+                "",
+                "输入 1 配置 Token，输入 2 切换推送开关，输入 3 发送测试消息，输入 9 清空 Token，输入 0 退出："
+            ].join("\n"));
+            if (!choice) return;
+            const num = parseInt(choice);
+            if (num === 0) return;
+            if (num === 1) {
+                const current = String(GM_getValue("Notice.pushplusToken", "") || "");
+                const next = Utils.safePrompt(`配置 PushPlus Token\n\n微信扫码登录 pushplus.plus 后，首页即可获取自己的 token。\n\n当前值: ${current ? "已配置" : "(空)"}\n\n请输入新的值（留空即清除）：`, current);
+                if (next === null) return;
+                GM_setValue("Notice.pushplusToken", String(next).trim());
+                Utils.safeAlert(`PushPlus Token 已${String(next).trim() ? "保存" : "清除"}！`);
+            } else if (num === 2) {
+                GM_setValue("Notice.pushplus", !cfg.enabled);
+                Utils.safeAlert(`PushPlus 推送已${!cfg.enabled ? "开启" : "关闭"}！`);
+            } else if (num === 3) {
+                Utils.safeAlert(["📢 测试消息已发出", ...sendTestNotification()].join("\n"));
+            } else if (num === 9) {
+                GM_setValue("Notice.pushplusToken", "");
+                Utils.safeAlert("PushPlus 配置已清空，之后仅使用浏览器通知。");
+            } else {
+                Utils.safeAlert("无效的编号！");
             }
-            const nowCfg = PushPlus.read();
-            if (PushPlus.ready()) Utils.sendPushPlus();
-            const testLines = [
-                "📢 测试消息已发出",
-                `浏览器通知: ${GM_getValue("Notice.bro", true) ? "已发送" : "已关闭"}`,
-                `PushPlus 微信推送: ${PushPlus.ready() ? "已发送（结果见脚本日志）" : (nowCfg.enabled ? "未配置 Token" : "已关闭")}`
-            ];
-            if (!PushPlus.ready()) {
-                testLines.push("", "配置方式：本菜单输入 1 填 Token，或脚本设置面板 Notice 分组");
-            }
-            Utils.safeAlert(testLines.join("\n"));
-            return;
         }
-        if (num === 9) {
-            if (!Utils.safeConfirm("确定清空 PushPlus Token 吗？清空后仅使用浏览器通知。")) return;
-            GM_setValue("Notice.pushplusToken", "");
-            Utils.safeAlert("PushPlus 配置已清空，之后仅使用浏览器通知。");
-            return;
-        }
-        Utils.safeAlert("无效的编号！");
     });
 
     // v1.8.1：原「📢 测试通知」已并入「🔔 配置 PushPlus 推送」的第 3 项，此处不再单独注册菜单
@@ -4912,22 +5147,38 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
     }
 
     // 菜单注册：诊断相关收成一个入口，避免「调试信息」与「导出诊断数据」两个近似项并列
-    GM_registerMenuCommand("🔧 诊断信息", async () => {
-        const choice = Utils.safePrompt(
-            "🔧 诊断信息\n"
-            + "==================\n\n"
-            + "1 = 查看运行调试信息（账号/任务/接口状态，查看后可复制）\n"
-            + "2 = 导出完整诊断 JSON（含各接口原始字段，排障时用）\n"
-            + "0 = 退出"
-        );
-        // 后台上下文（ScriptCat 的菜单常在无 DOM 的上下文执行）拿不到弹窗时默认走「查看调试信息」，
+    GM_registerMenuCommand("🔧 诊断信息", () => {
+        const panel = Utils.showPanel({
+            title: "诊断信息",
+            meta: `v${GM_info.script.version}`,
+            note: "排障先用「查看调试信息」；要把完整数据发给开发者时用「导出诊断 JSON」（账号与邮箱已脱敏）",
+            logTitle: "两种输出",
+            log: [
+                "查看调试信息   环境 / 账号 / 任务 / 登录 / Server Action / 最近调试，共 6 段，可直接复制",
+                "导出诊断 JSON  各接口原始字段与覆盖情况，账号、邮箱、令牌已脱敏"
+            ],
+            actions: [
+                {
+                    label: "查看调试信息",
+                    primary: true,
+                    onClick: (area, close) => {
+                        close();
+                        showDebugInfo().catch((e) => Utils.log("🔴", `调试信息打开失败: ${e.message}`));
+                    }
+                },
+                {
+                    label: "导出诊断 JSON",
+                    onClick: (area, close) => {
+                        close();
+                        exportDiagnostics().catch((e) => Utils.log("🔴", `诊断数据导出失败: ${e.message}`));
+                    }
+                },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 后台上下文拿不到 DOM（showPanel 返回 null）时默认走「查看调试信息」，
         // 该分支自带降级：复制到剪贴板 + 系统通知 + 打开 rewards 页展示
-        const raw = choice === null || choice === undefined ? "" : String(choice).trim();
-        const num = raw || (typeof document === "undefined" ? "1" : "");
-        if (!num || num === "0") return;
-        if (num === "1") { await showDebugInfo(); return; }
-        if (num === "2") { await exportDiagnostics(); return; }
-        Utils.safeAlert("无效的编号！");
+        if (!panel) showDebugInfo().catch(() => {});
     });
 
     const updateBroMenu = () => {
@@ -4935,10 +5186,33 @@ button:focus-visible,.rawbox>summary:focus-visible,textarea:focus-visible{outlin
         return enabled ? "🔕 关闭浏览器通知" : "🔔 开启浏览器通知";
     };
     GM_registerMenuCommand(updateBroMenu(), () => {
-        const current = GM_getValue("Notice.bro", true);
-        GM_setValue("Notice.bro", !current);
-        Utils.safeAlert(`浏览器通知已${!current ? "开启" : "关闭"}`);
-        Utils.safeReload();
+        const enabled = GM_getValue("Notice.bro", true);
+        const panel = Utils.showPanel({
+            title: "通知设置",
+            meta: `v${GM_info.script.version}`,
+            note: `浏览器通知当前${enabled ? "已开启" : "已关闭"}；PushPlus 微信推送在「🔔 配置 PushPlus 推送」里单独开关`,
+            fields: [
+                { type: "checkbox", key: "bro", label: "浏览器通知（任务完成 / 异常提醒）", value: enabled }
+            ],
+            actions: [
+                {
+                    label: "保存并刷新",
+                    primary: true,
+                    onClick: (area, close, api) => {
+                        GM_setValue("Notice.bro", Boolean(api.values().bro));
+                        close();
+                        Utils.safeReload();
+                    }
+                },
+                { label: "关闭", onClick: (area, close) => close() }
+            ]
+        });
+        // 后台上下文拿不到 DOM：沿用一键切换
+        if (!panel) {
+            GM_setValue("Notice.bro", !enabled);
+            Utils.safeAlert(`浏览器通知已${!enabled ? "开启" : "关闭"}`);
+            Utils.safeReload();
+        }
     });
 
     /**
