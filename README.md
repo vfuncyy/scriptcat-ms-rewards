@@ -2,7 +2,7 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.8.5 · License：MIT
+> 版本：v1.8.6 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 > v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
 
@@ -100,6 +100,17 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v1.8.6（代码整理：删死代码 + 合并重复实现）
+
+- 🧹 **删除 5 个零引用方法**：`Utils.waitForElement`、`Utils.waitForElementsByText`、`API.appActivity`、`API.getRewardsToken`、`API.getNextActionHash`（合计约 107 行，全脚本无任何调用点）
+- 🧩 **合并 3 份手写 JSON 括号配平**：`pointsCounters` / `activityCards` / `pointsHistory` 原来各写一套 `depth++` 扫描循环，现统一用新增的 `Utils.jsonBlock(text, key, maxLen)`，`getServerStats` 里的 `grabBlock` 也改为一行委托
+- 📏 **整理 `_fetchRewardsInfo`**：删掉多余的 `if (balance === 0)` 包裹，把 6 条「先 HTML 正则、再 JSON 正则」的兜底收成一个 `pick()` 小工具，函数从 155 行降到约 128 行
+- 🎛️ **合并 8 处 DAPI 请求头**：新增 `API.dapiHeaders(token, region, withPartner)`，`x-rewards-appid` / `x-rewards-ismobile` / `x-rewards-country` 等常量各只保留一处定义，避免将来改一处漏七处
+- 📝 修正两段错位的 JSDoc（`_isAppSearchCard` 与 `_cardBlockReason` 的说明互相串了）
+- ⚙️ 纯代码整理，**不改任何业务判定与请求内容**；`info.mobile` 字段保留（国际版账号仍有手机配额，国内恒为 0 只是分支空转）
+
+> 说明：脚本体积从 281778B 降到约 272909B（约 -3.1%），运行时行为与 v1.8.5 一致。
 
 ### v1.8.5（周任务交卷排障增强）
 
