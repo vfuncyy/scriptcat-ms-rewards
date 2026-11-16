@@ -2,9 +2,10 @@
 
 脚本猫（ScriptCat）用户脚本 —— 自动完成 Microsoft Rewards 每日任务，并通过浏览器通知 / 微信（PushPlus）推送进度与日报。
 
-> 版本：v1.8.6 · License：MIT
+> 版本：v3.0.0 · License：MIT
 > 基于开源原版「微软积分（持续修复版）」迭代，本仓库版本已重构推送模块，并适配 2026-11 新版站点（纯服务端渲染 + 懒加载 Server Action）。
 > v1.7.0 起脚本更名为「微软bing rewards积分获取（持续优化版）」，功能与存储键保持兼容（`@storageName` 未变，升级不会丢配置）。
+> **v3.0.0 是单文件后台脚本**：参数全部收进脚本猫原生设置面板，不再需要（也不提供）任何配套的「控制台」页面脚本。
 
 ---
 
@@ -24,7 +25,7 @@
 
 | 渠道 | 说明 |
 | --- | --- |
-| 浏览器通知 | 默认开启，脚本菜单「🔕/🔔」可切换 |
+| 浏览器通知 | 默认开启，菜单「🔔 浏览器通知开关」可切换 |
 | PushPlus（微信） | v1.5.0 新增；扫码登录 [pushplus.plus](https://www.pushplus.plus/) 后首页获取 token |
 
 > v1.5.0 起**已移除** WorkBuddy 本机服务推送与通用 Webhook 推送的全部代码与配置项。
@@ -32,10 +33,10 @@
 **PushPlus 配置步骤**：
 
 1. 微信扫码登录 pushplus.plus，复制首页的 token；
-2. 脚本菜单 →「🔔 配置 PushPlus 推送」→ 输入 `1` → 粘贴 token；
-3. 菜单 →「📢 测试通知」验证（结果见脚本日志：「🔵 已受理」/「🔴 出错」）。
+2. 脚本菜单 →「⚙️ 打开设置（参数都在这里）」→ 在 `Notice` 分组填 `PushPlus Token`（v3.0 起**不再有**「🔔 配置 PushPlus 推送」这个交互菜单，原因见下）；
+3. 把 `Notice.pushplus` 打开即生效；结果见脚本日志「🔵 已受理 / 🔴 出错」。
 
-也可在脚本设置面板 `Notice` 分组中直接填写 `PushPlus Token`。
+> **为什么菜单变少了**：本脚本是 `@crontab` 定时脚本，运行在 service worker / offscreen 里，**没有 `document`、没有 `prompt/alert/confirm`**。v1.8.6 及更早的六个菜单全都依赖 `Utils.safePrompt` / `Utils.safeAlert` / `Utils.showTextPanel`，点下去只能走空兜底 —— 这就是「点菜单没反应」的真正原因（也是 v2.x 一度拆出独立「控制台」页面脚本的起因）。v3.0 改为：**能改的东西全在设置面板里**，菜单只保留后台真能跑通的形态（打开标签页 / 立即执行 / 输入框 / 通知回执）。
 
 ## ⬇️ 下载
 
@@ -59,11 +60,20 @@
 
 设置面板分三组：
 
-- `Config`：常驻后台、运行锁、搜索间隔、授权码接口等
-- `Tasks`：签到 / 阅读 / 活动卡 / 问答 / 搜索 五项任务开关
+- `Config`：持续检测、锁定国区、搜索间隔、搜索词接口、授权码链接
+- `Tasks`：签到 / 阅读 / 活动卡 / 问答 / 搜索 / 桌面周任务 六项任务开关
 - `Notice`：浏览器通知开关、PushPlus 开关、PushPlus Token
 
-常用菜单：🔑 手动授权 · 📋 粘贴/兑换授权码 · 📊 运行状态 · 🚀 立即运行 · 🔔 配置 PushPlus 推送 · 🔧 诊断信息 · 🔕/🔔 浏览器通知
+常用菜单（v3.0 起只剩 6 项，全部后台可用）：
+
+| 菜单 | 行为 | 备注 |
+| --- | --- | --- |
+| 🔑 手动授权 | 打开 OAuth 授权页 | 回调页自动捕获 code 并兑换 |
+| ⌨️ 粘贴授权码 | 弹输入框，粘贴跳转 URL 或裸码 | **只出现在扩展图标弹出的面板里**，右键子菜单不显示；留空=用设置面板里已填的码 |
+| 📊 运行状态 | 把 Token / 今日进度 / 推送目标拼成一段文字 | 走浏览器通知 + PushPlus 回执，不弹面板 |
+| 🚀 立即运行 | 立刻跑一轮任务 | 运行锁生效，不会和定时轮次撞车 |
+| ⚙️ 打开设置（参数都在这里） | 打开脚本猫原生 UserConfig 表单 | 所有可调参数都在这里 |
+| 🔔 浏览器通知开关 | 翻转 `Notice.bro` | 结果用通知回执 |
 
 ## 🧩 工作原理（模块速览）
 
@@ -74,11 +84,11 @@
 | 登录回调捕获 | 在 `oauth20_desktop.srf` 截获 OAuth code，兑换并续期 access token |
 | RewardsAuto | UA / offerId / 搜索词池 / 跳过规则等常量与运行状态（含兜底的领取 action id） |
 | PushPlus | 推送配置读取与就绪判定（endpoint、token、开关） |
-| Utils | 缓存（TTL+单飞）、安全 UI 封装、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()` |
+| Utils | 缓存（TTL+单飞）、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()`（v3.0 已删除依赖 DOM 的 `safeAlert/safePrompt/safeConfirm/safeReload/showTextPanel/copyText`） |
 | API 层 | token 生命周期、**dashboard 服务端渲染解析**（余额/等级/连签/待领取）、DAPI 511 字段适配、阅读与卡片（Server Action 动态解析）、搜索（热词 + 配额）、区域检查 |
 | 自动领取 | 两跳定位懒加载 chunk 里的 `reportClaimAllPoints` action id → `POST /dashboard`（`Next-Action` 头 + `[]`）→ 余额复核 |
 | TaskManager | 运行锁、完成调度、七项任务执行、报表汇总、收尾推送 |
-| 菜单系统 | 授权 / 兑换 / 状态 / 立即运行 / 推送配置 / 测试通知 / 调试导出 |
+| 菜单系统 | v3.0 重写：只剩授权 / 粘贴授权码 / 状态 / 立即运行 / 打开设置 / 通知开关，全部不依赖 DOM 与 prompt |
 | init | crontab 注册；Bing 搜索页跳过初始化；登录回调页立即兑换 token |
 
 ## 🗂️ 文件结构
@@ -100,6 +110,19 @@ scriptcat-ms-rewards/
 - PushPlus token 请自行注册获取，勿使用他人 token。
 
 ## 🔧 改动记录
+
+### v3.0.0（取消控制台，回归单文件后台脚本）
+
+**这一版只解决一件事**：让「后台脚本 + 菜单」这套组合真正跑得通，不再需要另一个页面脚本来当控制台。
+
+- 🗑️ **彻底删除 DOM 依赖层**：`Utils.safeAlert` / `safePrompt` / `safeConfirm` / `safeReload` / `showTextPanel` / `copyText`（含 `@grant GM_setClipboard`）以及 `showDebugInfo`、`exportDiagnostics`、`pendingDebugView` 渲染块。这些在 `@crontab` 环境里全部是「判断 `document` 不存在 → 返回 null / 空操作」的死代码，却是 v2.x 拆出控制台脚本的唯一理由。
+- 🎛️ **参数统一进脚本猫原生设置面板**：`Config` / `Tasks` / `Notice` 三组照旧，填写即生效；新增「⚙️ 打开设置（参数都在这里）」菜单直接调 `CAT_userConfig()` 跳过去，用户不必再去扩展列表里翻。
+- ⌨️ **授权码三入口，全部后台可用**：① 设置面板「授权码链接」（`GM_addValueChangeListener` 监听，写入即兑换）；② 菜单「⌨️ 粘贴授权码」（`CAT_registerMenuInput` 输入框，留空则用面板里已填的码）；③ 菜单「🔑 手动授权」+ 回调页自动兑换。
+- 📊 **状态与结果改走通知回执**：菜单不再弹面板，而是把状态拼成一段文字，通过 `Utils.log(msg, push=true)` 发浏览器通知 + PushPlus，并写入 `Config.lastStats` 留档。
+- 🧹 **菜单从 8 项收敛到 6 项**：🔑 手动授权 · ⌨️ 粘贴授权码 · 📊 运行状态 · 🚀 立即运行 · ⚙️ 打开设置 · 🔔 浏览器通知开关。
+- 🔌 **新增 `@grant CAT_registerMenuInput` / `CAT_userConfig`**，补 `@connect 3g.qq.com`（`getIPInfo()` 的 referer 域名，此前静态检查一直报 connect 缺失）。
+- 📉 **脚本体积 273166B → 246582B（-9.7%），4858 行 → 4369 行（-489 行）**；业务逻辑（签到 / 阅读 / 活动 / 搜索 / 桌面周任务 / 领分 / 推送 / 运行锁 / Token 生命周期）**一行未改**。
+- ⚠️ **行为变化**：原先点「🔧 诊断信息」导出的 JSON、点「📊 运行状态」看到的弹窗，现在都不再出现；排查问题改用脚本日志 + 浏览器通知，或临时把 `Config.debugLog` 打开看环形缓冲。
 
 ### v1.8.6（代码整理：删死代码 + 合并重复实现）
 

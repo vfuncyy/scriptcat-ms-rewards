@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微软bing rewards积分获取（持续优化版）
 // @namespace    https://rewards.bing.com/
-// @version      1.8.6
-// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；全程后台运行，不打开多余标签页
+// @version      3.0.0
+// @description  每天后台自动完成 Microsoft Rewards 任务（PC/APP 签到、新闻阅读、活动卡片、任务卡、PC 搜索、桌面应用周任务、待领取积分），并按服务端真实数据推送「半程进度 / 每日日报 / 异常提醒」到浏览器通知与微信（PushPlus）；每天固定运行，不会因为昨天已完成而跳过；v3.0 起取消独立的「控制台」页面脚本，参数统一收进脚本猫原生设置面板，全程后台单脚本运行，不打开多余标签页
 // @icon         https://bing.com/th?id=OMR.icon-96.png&pid=Rewards
 // @license      MIT
 // @crontab      */20 * * * *
@@ -14,6 +14,7 @@
 // @connect      hot.baiwumm.com
 // @connect      cnxiaobai.com
 // @connect      disp-qryapi.3g.qq.com
+// @connect      3g.qq.com
 // @connect      pushplus.plus
 // @match        https://login.live.com/oauth20_desktop.srf*
 // @match        https://rewards.bing.com/*
@@ -30,8 +31,9 @@
 // @grant        GM_info
 // @grant        GM_log
 // @grant        GM_registerMenuCommand
-// @grant        GM_setClipboard
 // @grant        GM_addValueChangeListener
+// @grant        CAT_registerMenuInput
+// @grant        CAT_userConfig
 // @storageName  BingRewardsAuto_Shared
 // @homepageURL  https://github.com/vfuncyy/scriptcat-ms-rewards
 // @supportURL   https://github.com/vfuncyy/scriptcat-ms-rewards/issues
@@ -81,7 +83,7 @@ Config:
     code:
         title: 授权码链接
         type: textarea
-        description: 粘贴 login.live.com 跳转后的完整URL；保存后会立即兑换 Token（兑换失败请用菜单「📋 粘贴授权码」重试）
+        description: 粘贴 login.live.com 跳转后的完整URL；保存后会立即兑换 Token（兑换失败可点菜单「⌨️ 粘贴授权码」重试）
 Tasks:
     sign:
         title: 每日签入
@@ -370,30 +372,6 @@ Notice:
             }
         },
 
-        /** 后台上下文没有 alert/prompt/confirm，统一降级避免菜单命令抛错 */
-        safeAlert(message) {
-            try {
-                if (typeof alert === "function") { alert(String(message)); return; }
-            } catch (_) {}
-            try { GM_notification({ title: GM_info.script.name, text: String(message) }); } catch (_) {}
-        },
-        safePrompt(message, defaultValue = "") {
-            try {
-                if (typeof prompt === "function") return prompt(String(message), defaultValue);
-            } catch (_) {}
-            this.safeAlert(`后台环境不支持输入框，请在脚本猫设置页修改配置。\n${message}`);
-            return null;
-        },
-        safeConfirm(message) {
-            try { if (typeof confirm === "function") return confirm(String(message)); } catch (_) {}
-            return false;
-        },
-        safeReload() {
-            try {
-                if (typeof location !== "undefined" && typeof location.reload === "function") location.reload();
-            } catch (_) {}
-        },
-
         log(icon, msg, push = false) {
             GM_log(`${icon} ${msg}`);
             if (push && GM_getValue("Notice.bro", true)) {
@@ -429,95 +407,6 @@ Notice:
             if (GM_getValue("Config.debugLog", false)) {
                 GM_log(`🔧 [${entry.tag}] ${entry.msg}`);
             }
-        },
-
-        /**
-         * 复制文本到剪贴板：后台上下文优先用 GM_setClipboard，页面上下文回退到 DOM
-         * @param {string} text 待复制文本
-         * @returns {boolean} 是否复制成功
-         */
-        copyText(text) {
-            try {
-                if (typeof GM_setClipboard === "function") {
-                    GM_setClipboard(text, "text");
-                    return true;
-                }
-            } catch (_) {}
-            if (typeof document === "undefined") return false;
-            try {
-                const helper = document.createElement("textarea");
-                helper.value = text;
-                helper.style.cssText = "position:fixed;left:-9999px;top:0;";
-                (document.body || document.documentElement).appendChild(helper);
-                helper.focus();
-                helper.select();
-                const ok = document.execCommand("copy");
-                helper.remove();
-                return ok;
-            } catch (_) {
-                return false;
-            }
-        },
-
-        /**
-         * 在页面中展示只读文本面板（后台 service worker 无 DOM 时返回 null）
-         * @param {string} title 面板标题
-         * @param {string} text 面板初始文本
-         * @param {string} note 标题下方的状态提示（如复制成功/失败）
-         * @returns {{setText:Function,close:Function}|null} 面板控制句柄
-         */
-        showTextPanel(title, text, note = "") {
-            if (typeof document === "undefined") return null;
-            const host = document.body || document.documentElement;
-            if (!host) return null;
-            const overlay = document.createElement("div");
-            overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;";
-            const panel = document.createElement("div");
-            panel.style.cssText = "background:#fff;border-radius:10px;padding:14px;width:min(680px,94vw);max-height:86vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 12px 36px rgba(0,0,0,.3);font:13px/1.5 system-ui,sans-serif;";
-            const head = document.createElement("div");
-            head.textContent = title;
-            head.style.cssText = "font-weight:600;font-size:15px;";
-            const area = document.createElement("textarea");
-            area.value = text;
-            area.readOnly = true;
-            area.style.cssText = "width:100%;height:56vh;font:12px/1.5 Consolas,monospace;white-space:pre;border:1px solid #ddd;border-radius:6px;padding:8px;";
-            const bar = document.createElement("div");
-            bar.style.cssText = "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;";
-            /**
-             * 创建面板按钮
-             * @param {string} label 按钮文字
-             * @param {Function} onClick 点击回调
-             * @returns {HTMLButtonElement} 按钮元素
-             */
-            const makeBtn = (label, onClick) => {
-                const btn = document.createElement("button");
-                btn.textContent = label;
-                btn.style.cssText = "padding:6px 12px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7;cursor:pointer;font-size:13px;";
-                btn.onclick = onClick;
-                return btn;
-            };
-            if (note) {
-                const noteEl = document.createElement("div");
-                noteEl.textContent = note;
-                noteEl.style.cssText = "font-size:12px;color:#666;background:#f6f7f9;border-radius:6px;padding:6px 8px;";
-                panel.append(noteEl);
-            }
-            bar.append(
-                makeBtn("复制全部", () => {
-                    area.focus();
-                    area.select();
-                    if (Utils.copyText(area.value)) alert("已复制到剪贴板");
-                }),
-                makeBtn("关闭", () => overlay.remove())
-            );
-            panel.append(area, bar);
-            overlay.append(panel);
-            overlay.onclick = (ev) => { if (ev.target === overlay) overlay.remove(); };
-            host.append(overlay);
-            return {
-                setText: (next) => { area.value = next; },
-                close: () => overlay.remove()
-            };
         },
 
         /**
@@ -3002,6 +2891,8 @@ Notice:
             //        这里的重置只清「当日尝试计数」，不含「已完成」标记，重复执行无副作用
             // v1.8.6 是纯代码整理（删死代码 / 合并重复解析与请求头），不改任何业务判定；
             //        保留同一重置逻辑，重复执行无副作用
+            // v3.0 只改 UI 层（删 DOM 依赖 / 重写菜单 / 参数全进设置面板），业务语义与 v1.8.6 完全一致；
+            //        故意不升 engineVersion —— 升级不该让当天已经跑过的卡片被重新尝试一遍
             const engineVersion = "1.8.6";
             if (GM_getValue("Config.engineVersion", "") !== engineVersion) {
                 this.promosDate = 0;
@@ -4203,23 +4094,6 @@ Notice:
     }
 
     /**
-     * 兑换并打印结果（菜单场景统一入口）
-     * @param {string} code 授权码
-     * @param {string} okText 成功提示文案
-     */
-    async function exchangeAndReport(code, okText = "🎉 Token获取成功！授权已完成") {
-        const res = await exchangeAuthCode(code);
-        if (res.ok) {
-            Utils.safeAlert(okText);
-        } else if (res.concurrentOk) {
-            Utils.safeAlert("🎉 Token已由其他上下文获取成功！授权已完成");
-        } else {
-            Utils.safeAlert(`⚠️ Token获取失败${res.hint}\n请重新点击「🔑 手动授权」并粘贴最新的跳转URL`);
-        }
-        return res;
-    }
-
-    /**
      * 面板/设置页写入授权码后的即时兑换
      * 背景：UserConfig 面板只把值写进存储，脚本原本要等下一轮定时（最长 20 分钟）才读取并兑换，
      *      而微软授权码是短时效的，等到那时基本必然 invalid_grant——这就是「面板填了不能用」的根因。
@@ -4252,8 +4126,10 @@ Notice:
         return false;
     }
 
-    // v1.8.1：原「⚡ 兑换面板授权码」已并入「📋 粘贴/兑换授权码」（弹窗留空即读取面板里的授权码），
-    // 三个授权入口收敛为两个，避免同名功能分散在菜单里
+    // 3.0 授权码入口收敛为三条，全部后台可用：
+    //   ① 设置面板「授权码链接」（写入即兑换，见下方监听）
+    //   ② 菜单「⌨️ 粘贴授权码」（输入框，留空则用设置面板里已填的码）
+    //   ③ 菜单「🔑 手动授权」（打开授权页，回调页自动兑换）
 
     /**
      * 面板写入监听：ScriptCat/Tampermonkey 的 GM_addValueChangeListener 会在其他上下文
@@ -4270,61 +4146,85 @@ Notice:
         }
     } catch (_) {}
 
-    GM_registerMenuCommand("📋 粘贴/兑换授权码", async () => {
-        const input = Utils.safePrompt(
-            "粘贴授权页面跳转后的完整URL（或直接粘贴授权码）:\n\n"
-            + "· 留空确定 = 使用设置面板里已填的「授权码链接」\n"
-            + "· 取消 = 不做任何操作"
-        );
-        // 取消：safePrompt 返回 null
-        if (input === null || input === undefined) return;
-        const typed = String(input).trim();
+    // ===== 3.0：菜单层重写（后台环境真正跑得通的几种形态） =====
+    // v1.8.6 及更早版本的六个菜单全部依赖 safePrompt / safeAlert / showTextPanel，
+    // 而本脚本是 @crontab，跑在 service worker / offscreen 里——没有 document、没有 prompt。
+    // 点下去只能走空兜底，用户看到的现象就是「菜单没反应」，这正是 v2.x 拆出「控制台」页面脚本的起因。
+    // 3.0 的结论：可调参数全部交给 ==UserConfig==（脚本猫原生表单，任何时刻可改，下一轮即生效），
+    // 菜单只保留「打开标签页 / 直接执行 / 输入框 / 通知回执」这几种后台真能跑通的形态，
+    // 结果统一走 Utils.log(push=true) → 浏览器通知 + PushPlus，不再渲染任何 DOM。
 
-        // 留空分支：等价于原「⚡ 兑换面板授权码」，读取设置面板里填写的内容
-        if (!typed) {
-            const panelRaw = String(GM_getValue("Config.code", "") || "").trim();
-            if (!panelRaw) {
-                Utils.safeAlert("⚠️ 设置面板里的「授权码链接」也是空的。\n请先点击「🔑 手动授权」，把跳转后的完整网址粘进弹窗或设置面板。");
-                return;
-            }
-            const panelCode = Utils.extractAuthCode(panelRaw);
-            if (!panelCode) {
-                Utils.safeAlert("⚠️ 面板里的内容不是有效授权码。\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转网址。");
-                return;
-            }
-            // 手动触发的兑换不受 codeClaim 限制（用户明确要求重试）
-            GM_setValue("Config.codeClaim", panelCode);
-            Utils.safeAlert("✅ 已读取面板授权码，正在兑换 Token...");
-            try {
-                const res = await exchangeAndReport(panelCode, "🎉 面板授权码兑换成功，授权已完成");
-                // 兑换成功后清掉面板里的码，避免下一轮定时把一次性码再兑换一次
-                if ((res.ok || res.concurrentOk) && String(GM_getValue("Config.code", "") || "").trim() === panelRaw) {
-                    GM_setValue("Config.code", "");
-                }
-            } catch (e) {
-                Utils.safeAlert(`⚠️ 兑换出错: ${e.message}`);
-            }
-            return;
-        }
-
-        const code = Utils.extractAuthCode(typed);
+    /**
+     * 兑换一次授权码并把结果说给用户听（替代旧版 safePrompt + exchangeAndReport）
+     * @param {string} raw 完整跳转URL 或裸授权码
+     * @returns {Promise<boolean>} 是否兑换成功（含被其他上下文成功兑换）
+     */
+    async function submitAuthCode(raw) {
+        const text = String(raw || "").trim();
+        const code = Utils.extractAuthCode(text);
         if (!code) {
-            Utils.safeAlert("⚠️ 未识别到有效授权码！\n请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转URL。");
-            return;
+            Utils.log("🔴", "未识别到有效授权码：请粘贴 oauth20_desktop.srf?code=... 格式的完整跳转URL", true);
+            return false;
         }
-        // 不把授权码写入共享存储，避免定时轮询/其他页面抢先把同一码兑换掉。
-        // 旧 refresh_token 也不在这里删除：新码失败时仍可回退到旧 token。
-        Utils.safeAlert("✅ 授权码已识别，正在尝试获取 Token...");
-        try {
-            await exchangeAndReport(code);
-        } catch (e) {
-            Utils.safeAlert(`⚠️ Token获取出错: ${e.message}`);
+        Utils.log("🟢", "已识别授权码，正在兑换 Token…", true);
+        const res = await exchangeAuthCode(code);
+        if (res.ok) {
+            Utils.log("🟢", "Token 获取成功，授权已完成", true);
+        } else if (res.concurrentOk) {
+            Utils.log("🟢", "Token 已由其他上下文获取成功，授权已完成", true);
+        } else {
+            Utils.log("🔴", `Token 获取失败${res.hint}；请重新点「🔑 手动授权」并粘贴最新的跳转URL`, true);
         }
+        // 兑换成功后清掉设置面板里的旧码，免得下一轮又拿这张过期票去换
+        if ((res.ok || res.concurrentOk) && String(GM_getValue("Config.code", "") || "").trim() === text) {
+            GM_setValue("Config.code", "");
+        }
+        return res.ok || res.concurrentOk;
+    }
+
+    // 授权码入口：设置面板（写入即兑换，见上方 Config.code 监听）→ 本菜单（输入框）→「🔑 手动授权」跳转
+    try {
+        if (typeof CAT_registerMenuInput === "function") {
+            // 注意：带 inputType 的菜单项只出现在扩展图标弹出的面板里，右键「脚本猫」子菜单不显示
+            CAT_registerMenuInput("⌨️ 粘贴授权码", async (input) => {
+                const typed = String(input || "").trim();
+                const raw = typed || String(GM_getValue("Config.code", "") || "").trim();
+                if (!raw) {
+                    Utils.log("🟡", "没有输入授权码，设置面板里也是空的；请先点「🔑 手动授权」", true);
+                    return;
+                }
+                try {
+                    await submitAuthCode(raw);
+                } catch (e) {
+                    Utils.log("🔴", `兑换授权码出错: ${e.message}`, true);
+                }
+            }, {
+                inputType: "text",
+                title: "粘贴授权码",
+                inputLabel: "完整跳转URL 或 code= 后面的授权码（留空=用设置面板里已填的码）",
+                inputPlaceholder: "https://login.live.com/oauth20_desktop.srf?code=M.C5..."
+            });
+        } else if (typeof GM_registerMenuCommand === "function") {
+            // 老版本脚本猫没有输入框型菜单：退化成「直接兑换设置面板里已填的码」
+            GM_registerMenuCommand("⌨️ 兑换设置面板里的授权码", () => {
+                const raw = String(GM_getValue("Config.code", "") || "").trim();
+                if (!raw) {
+                    Utils.log("🟡", "设置面板里的「授权码链接」是空的，请先点「🔑 手动授权」", true);
+                    return;
+                }
+                submitAuthCode(raw).catch(e => Utils.log("🔴", `兑换授权码出错: ${e.message}`, true));
+            });
+        }
+    } catch (_) {}
+
+    GM_registerMenuCommand("🚀 立即运行", () => {
+        TaskManager.runAll(true).catch(e => Utils.log("🔴", `手动运行失败: ${e.message}`, true));
     });
 
+    // 运行状态改为通知/推送回执：后台没有 DOM，弹不出面板，但通知里同样能把话说全
     GM_registerMenuCommand("📊 运行状态", () => {
         const token = GM_getValue("Config.token", false);
-        const time = GM_getValue("Config.tokenTime", 0);
+        const time = Number(GM_getValue("Config.tokenTime", 0)) || 0;
         let ageStr = "未知";
         if (time > 0) {
             const diff = Utils.getTimestamp() - time;
@@ -4345,7 +4245,6 @@ Notice:
         const errLine = lastErr
             ? `最近错误: [${new Date(Number(lastErr.t) || 0).toLocaleTimeString("zh-CN")}] ${lastErr.grant} → ${lastErr.error} ${lastErr.description || ""}`
             : "最近错误: 无";
-        // v1.8.1：状态面板补上推送与今日进度，避免用户再去别处确认
         const pushCfg = PushPlus.read();
         const pushState = PushPlus.ready()
             ? "PushPlus（微信）+ 浏览器通知"
@@ -4353,422 +4252,36 @@ Notice:
         const broState = GM_getValue("Notice.bro", true) ? "开" : "关";
         const todayDone = [["签到", TaskManager.signDate], ["阅读", TaskManager.readDate], ["活动", TaskManager.promosDate], ["搜索", TaskManager.searchDate]]
             .filter(([, d]) => d === RewardsAuto.state.dateNowNum).length;
-        Utils.safeAlert(
-            `RefreshToken: ${token ? "已保存" : "无"}\n`
-            + `获取时间: ${tokenDate}\n已过: ${ageStr}\n`
-            + `AccessToken: ${accessState}\n授权码: ${GM_getValue("Config.code", "") ? "有" : "无"}\n`
-            + `${errLine}\n\n`
-            + `今日进度: ${todayDone}/4 项（签到·阅读·活动·搜索）\n`
-            + `浏览器通知: ${broState}\n推送目标: ${pushState}\n`
-            + `版本: ${GM_info.script.version}`
-        );
+        const status = [
+            `RefreshToken: ${token ? "已保存" : "无"}`,
+            `获取时间: ${tokenDate}（已过 ${ageStr}）`,
+            `AccessToken: ${accessState}`,
+            `授权码: ${GM_getValue("Config.code", "") ? "有" : "无"}`,
+            errLine,
+            `今日进度: ${todayDone}/4 项（签到·阅读·活动·搜索）`,
+            `浏览器通知: ${broState} · 推送目标: ${pushState}`,
+            `版本: ${GM_info.script.version}`
+        ].join("\n");
+        GM_setValue("Config.lastStats", status);
+        Utils.log("📊", status, true);
     });
 
-    // v1.8.1：去掉「忽略次日锁定」——跨日跳过逻辑已在 v1.8.0 删除，标签留着会误导
-    GM_registerMenuCommand("🚀 立即运行", () => {
-        TaskManager.runAll(true).catch(e => Utils.log("🔴", `手动运行失败: ${e.message}`));
-    });
-
-    GM_registerMenuCommand("🔔 配置 PushPlus 推送", () => {
-        /**
-         * 直接读写与 UserConfig 面板同一批存储键，
-         * 面板和菜单改的是同一份数据，不会出现“面板填了但脚本读不到”
-         */
-        const cfg = PushPlus.read();
-        const lines = [
-            "📲 PushPlus 微信推送配置",
-            "==================",
-            "",
-            `PushPlus Token: ${cfg.token ? "已配置" : "（空）"}`,
-            "   说明: 微信扫码登录 pushplus.plus，首页即可获取 token",
-            "",
-            `PushPlus 推送开关: ${cfg.enabled ? "✅ 开启" : "❌ 关闭"}`,
-            `浏览器通知: ${GM_getValue("Notice.bro", true) ? "✅ 开启" : "❌ 关闭"}（用菜单「🔕/🔔」切换）`,
-            "",
-            `实际推送目标: ${PushPlus.ready() ? "PushPlus（微信）" : "仅浏览器通知"}`,
-            "",
-            "输入 1 配置 Token，输入 2 切换推送开关，输入 3 发送测试消息，输入 9 清空 Token，输入 0 退出："
-        ];
-        const choice = Utils.safePrompt(lines.join("\n"));
-        if (!choice) return;
-        const num = parseInt(choice);
-        if (num === 0) return;
-        if (num === 1) {
-            const current = String(GM_getValue("Notice.pushplusToken", "") || "");
-            const next = Utils.safePrompt(`配置 PushPlus Token\n\n微信扫码登录 pushplus.plus 后，首页即可获取自己的 token。\n\n当前值: ${current ? "已配置" : "(空)"}\n\n请输入新的值（留空即清除）：`, current);
-            if (next === null) return;
-            GM_setValue("Notice.pushplusToken", next.trim());
-            Utils.safeAlert(`PushPlus Token 已${next.trim() ? "保存" : "清除"}！`);
-            return;
-        }
-        if (num === 2) {
-            GM_setValue("Notice.pushplus", !cfg.enabled);
-            Utils.safeAlert(`PushPlus 推送已${!cfg.enabled ? "开启" : "关闭"}！`);
-            return;
-        }
-        if (num === 3) {
-            // v1.8.1：原「📢 测试通知」并入此处；同时修掉一个老问题——
-            // 旧写法先设 state.sendMSG 再调 Utils.log(…, true)，而 log 内部会用 `${icon} ${msg}`
-            // 覆盖 sendMSG，导致推出去的是「📢 测试通知已发送」而不是自定义测试文案
-            const testText = "🧪 这是一条测试消息\n如果你看到这条消息，说明通知接口配置成功！";
-            RewardsAuto.state.sendMSG = testText;
-            try { GM_log("📢", testText); } catch (_) {}
-            if (GM_getValue("Notice.bro", true)) {
-                try { GM_notification({ title: GM_info.script.name, text: testText }); } catch (_) {}
-            }
-            const nowCfg = PushPlus.read();
-            if (PushPlus.ready()) Utils.sendPushPlus();
-            const testLines = [
-                "📢 测试消息已发出",
-                `浏览器通知: ${GM_getValue("Notice.bro", true) ? "已发送" : "已关闭"}`,
-                `PushPlus 微信推送: ${PushPlus.ready() ? "已发送（结果见脚本日志）" : (nowCfg.enabled ? "未配置 Token" : "已关闭")}`
-            ];
-            if (!PushPlus.ready()) {
-                testLines.push("", "配置方式：本菜单输入 1 填 Token，或脚本设置面板 Notice 分组");
-            }
-            Utils.safeAlert(testLines.join("\n"));
-            return;
-        }
-        if (num === 9) {
-            if (!Utils.safeConfirm("确定清空 PushPlus Token 吗？清空后仅使用浏览器通知。")) return;
-            GM_setValue("Notice.pushplusToken", "");
-            Utils.safeAlert("PushPlus 配置已清空，之后仅使用浏览器通知。");
-            return;
-        }
-        Utils.safeAlert("无效的编号！");
-    });
-
-    // v1.8.1：原「📢 测试通知」已并入「🔔 配置 PushPlus 推送」的第 3 项，此处不再单独注册菜单
-
-    /**
-     * 调试信息面板：汇总环境、账号、任务、登录与最近接口响应
-     * 默认不在日志中输出调试细节，需要时从菜单统一查看
-     */
-    async function showDebugInfo() {
-        /**
-         * 构造调试信息文本
-         * @returns {Promise<string>} 分区后的调试文本
-         */
-        const buildDebugText = async () => {
-            // 后台实例的内存态可能为空，先续期 Token，否则 DAPI 数据全部取不到
-            let tokenError = "";
-            if (!RewardsAuto.state.token) {
-                try {
-                    const ok = await API.renewToken();
-                    if (!ok || !RewardsAuto.state.token) tokenError = "续期失败，需重新授权";
-                } catch (e) {
-                    tokenError = e.message;
-                }
-            }
-            let stats = null;
-            try { stats = await API.getServerStats(); } catch (e) { tokenError = tokenError || e.message; }
-            /**
-             * 格式化进度/分组统计
-             * @param {Object} item 统计项
-             * @returns {string} 展示文本
-             */
-            const fmt = (item) => {
-                if (!item || !item.known) return "—";
-                if (item.total !== undefined) return `${item.done}/${item.total}`;
-                return `${item.progress}/${item.max}`;
-            };
-            // 强制重新扫描 Server Action：earn 与 dashboard 的 chunk 可能不同，合并后一起扫描
-            let actions = {};
-            try {
-                const [earnHtml, dashboardHtml] = await Promise.all([
-                    Utils.xhr({ url: "https://rewards.bing.com/earn" }),
-                    Utils.xhr({ url: "https://rewards.bing.com/dashboard" })
-                ]);
-                actions = await API.resolveServerActions(`${earnHtml || ""}\n${dashboardHtml || ""}`, true);
-            } catch (_) {
-                actions = RewardsAuto._serverActions || GM_getValue("Config.serverActions", null) || {};
-            }
-            let cookieNames = [];
-            try {
-                const cookie = await Utils.getCookieString("https://rewards.bing.com/");
-                cookieNames = cookie ? cookie.split("; ").map(p => p.split("=")[0]) : [];
-            } catch (_) {}
-            const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-            const recent = RewardsAuto.debugBuffer.slice(-30).reverse()
-                .map(e => `${new Date(e.t).toLocaleTimeString("zh-CN")} [${e.tag}] ${e.msg.slice(0, 180)}`)
-                .join("\n") || "（无）";
-            const sections = [
-                `【环境】\n${GM_info.script.version} · ${/Edg\//.test(ua) ? "Edge" : "Chrome"} · ${new Date().toLocaleString("zh-CN")}`,
-                `【账号】\n余额 ${stats && stats.balance !== null ? stats.balance : "—"} · 今日 ${stats && stats.earnedToday !== null ? `+${stats.earnedToday}` : "—"}\nToken ${RewardsAuto.state.token ? "已就绪" : `未获取${tokenError ? `（${tokenError}）` : ""}`} · 地区 ${RewardsAuto.state.region} · 主机 ${RewardsAuto.state.host}\n最近授权错误: ${(() => { const le = GM_getValue("Config.lastTokenError", null); return le ? `[${new Date(Number(le.t) || 0).toLocaleTimeString("zh-CN")}] ${le.grant} → ${le.error} ${le.description || ""}` : "无"; })()}`,
-                `【任务】\n签到 PC ${stats && stats.signPC.done ? "✅" : "⏳"} / APP ${stats && stats.signApp.done ? "✅" : "⏳"}\n阅读 ${fmt(stats && stats.read)} · 搜索 ${fmt(stats && stats.search)}\n日常 ${fmt(stats && stats.dailySet)} · 任务卡 ${fmt(stats && stats.punchcard)} · 活动 ${fmt(stats && stats.evergreen)}\n待领取 ${stats && stats.claimable > 0 ? `+${stats.claimable}` : "0"} · 已完成 ${stats ? stats.completedOfferIds.length : 0} 项`,
-                `【登录】\nCookie ${cookieNames.length} 项：${cookieNames.slice(0, 12).join(", ") || "空"}${RewardsAuto.state.pc401 ? "\nPC 会话：未登录" : ""}`,
-                `【Server Action】\nreportActivity ${actions.reportActivity ? "已解析" : "未解析"} · reportClaimAllPoints ${actions.reportClaimAllPoints ? "已解析" : "未解析"}\n已发现 ${actions.all ? actions.all.length : 0} 个动作ID：${Object.values(actions.names || {}).slice(0, 10).join(", ") || "—"}`,
-                `【最近调试】\n${recent}`
-            ];
-            return sections.join("\n\n");
-        };
-
-        // 后台上下文没有 DOM 时降级为通知
-        const notify = (text) => {
-            try { GM_notification({ title: "🔧 调试信息", text }); } catch (_) {}
-        };
-        // 页面上下文直接使用浏览器原生弹框（与旧版导出体验一致）；后台上下文降级为通知
-        try { Utils.safeAlert("🔧 正在采集调试信息，请稍候…"); } catch (_) { notify("正在采集，请稍候…"); }
+    // 参数统一在脚本猫原生设置面板（==UserConfig== 渲染出的表单），菜单只负责把用户送过去
+    GM_registerMenuCommand("⚙️ 打开设置（参数都在这里）", () => {
         try {
-            const text = await buildDebugText();
-            GM_setValue("Config.lastDebugInfo", text);
-            const copied = Utils.copyText(text);
-            const note = copied
-                ? "✅ 已复制到剪贴板，可直接粘贴"
-                : "⚠️ 自动复制失败，请点击「复制全部」或手动全选复制";
-            GM_setValue("Config.pendingDebugNote", note);
-            // 先明确告知复制结果，再展示正文
-            try { Utils.safeAlert(note); } catch (_) { notify(note.replace(/^[✅⚠️]+\s*/, "")); }
-            // 页面上下文直接弹面板；后台上下文没有 DOM：复制后打开页面面板展示
-            const panel = Utils.showTextPanel("🔧 调试信息", text, note);
-            if (!panel) {
-                GM_setValue("Config.pendingDebugView", true);
-                try { GM_openInTab("https://rewards.bing.com/earn", { active: true }); } catch (_) {}
-                notify(note.replace(/^[✅⚠️]+\s*/, ""));
+            if (typeof CAT_userConfig === "function") {
+                CAT_userConfig();
+                return;
             }
-        } catch (e) {
-            try { Utils.safeAlert(`⚠️ 调试信息采集失败：${e.message}`); } catch (_) { notify(`采集失败：${e.message}`); }
-        }
-    }
-
-
-
-    /**
-     * 诊断数据导出：采集服务端真实字段，用于校准推送中的积分与任务分类口径
-     * - 覆盖 getuserinfo、DAPI(options=511/613)、earn、dashboard
-     * - 自动脱敏账号标识与凭证，不导出 Token
-     */
-    async function exportDiagnostics() {
-        /**
-         * 递归脱敏：移除账号标识与凭证字段
-         * @param {*} input 原始数据
-         * @returns {*} 脱敏后的数据
-         */
-        const sanitize = (input) => {
-            const sensitiveKey = /^(email|mail|username|user_name|displayname|display_name|firstname|first_name|lastname|last_name|cid|accountid|account_id|avatar|avatarurl|gamertag|token|accesstoken|refreshtoken|authorization)$/i;
-            const walk = (value) => {
-                if (Array.isArray(value)) return value.map(walk);
-                if (value && typeof value === "object") {
-                    const out = {};
-                    for (const [key, val] of Object.entries(value)) {
-                        out[key] = sensitiveKey.test(key) ? "[redacted]" : walk(val);
-                    }
-                    return out;
-                }
-                if (typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return "***@***";
-                return value;
-            };
-            return walk(input);
-        };
-        /**
-         * 从页面 RSC/JSON 文本中提取指定键对应的 JSON 片段
-         * @param {string} text 页面文本（已处理转义）
-         * @param {string} key JSON 键名
-         * @returns {string|null} 片段原文
-         */
-        const grabBlock = (text, key) => Utils.jsonBlock(text, key);
-        /**
-         * 解析 JSON 片段，失败时返回原文样本
-         * @param {string|null} raw 片段原文
-         * @returns {*} 解析结果
-         */
-        const parseBlock = (raw) => {
-            if (!raw) return null;
-            try { return JSON.parse(raw); } catch (_) { return { _raw: raw.slice(0, 2000) }; }
-        };
-        /**
-         * 汇总 DAPI 推广任务关键字段（保留 attributes 全量键，便于识别分类）
-         * @param {Object} p DAPI 推广任务
-         * @returns {Object} 精简结构
-         */
-        const summarizePromo = (p) => {
-            const a = p?.attributes || {};
-            return {
-                offerId: a.offerid || p?.offerId || p?.name || "",
-                title: a.title || p?.title || p?.name || "",
-                type: a.type || p?.type || "",
-                category: a.category || p?.category || p?.promotionType || "",
-                hidden: a.hidden ?? p?.hidden,
-                complete: a.complete ?? p?.complete,
-                progress: a.progress ?? a.activityprogress ?? p?.progress ?? p?.pointProgress,
-                max: a.max ?? a.activitymax ?? p?.max ?? p?.pointProgressMax,
-                points: p?.pointProgressMax ?? p?.points ?? a.pointmax,
-                destination: a.destination || p?.destinationUrl || "",
-                attributeKeys: Object.keys(a),
-                attributes: a
-            };
-        };
-        /**
-         * 请求 DAPI 并返回关键结构
-         * @param {number} options 接口 options 值
-         * @returns {Promise<Object>} 结构化响应
-         */
-        const fetchDAPI = async (options) => {
-            const res = await API.withTokenRetry(token => Utils.xhr({
-                url: `https://prod.rewardsplatform.microsoft.com/dapi/me?channel=SAAndroid&options=${options}`,
-                headers: {
-                    ...API.dapiHeaders(token, "cn", false)
-                }
-            }));
-            if (!Utils.isJSON(res)) return { error: "非 JSON 响应", sample: String(res).slice(0, 300) };
-            const response = JSON.parse(res).response || {};
-            return {
-                responseKeys: Object.keys(response),
-                balance: response.balance,
-                counters: response.counters,
-                userStatus: response.userStatus,
-                promotions: Array.isArray(response.promotions) ? response.promotions.map(summarizePromo) : undefined
-            };
-        };
-        /**
-         * 扫描页面文本中的“今日/赚取”相关字段
-         * @param {string} text 页面文本
-         * @returns {Object} 字段名与值
-         */
-        const scanTodayFields = (text) => {
-            const hits = {};
-            const patterns = [
-                /"([A-Za-z0-9_]*(?:today|Today)[A-Za-z0-9_]*)"\s*:\s*("?[^",}\]]{0,60}"?)/g,
-                /"([A-Za-z0-9_]*(?:earned|Earned)[A-Za-z0-9_]*)"\s*:\s*("?[^",}\]]{0,60}"?)/g
-            ];
-            for (const pattern of patterns) {
-                let m;
-                while ((m = pattern.exec(text)) !== null) {
-                    if (!(m[1] in hits)) hits[m[1]] = m[2].replace(/^"|"$/g, "");
-                }
-            }
-            return hits;
-        };
-
-        try { Utils.safeAlert("🧪 正在采集诊断数据，请稍候（约 10 秒）…"); } catch (_) {
-            try { GM_notification({ title: "🧪 诊断数据", text: "采集中，请稍候（约 10 秒）…" }); } catch (_) {}
-        }
-        try {
-            await API.renewToken();
-            const report = {
-                generatedAt: new Date().toISOString(),
-                scriptVersion: GM_info.script.version,
-                tokenReady: Boolean(RewardsAuto.state.token),
-                lastTokenError: GM_getValue("Config.lastTokenError", null),
-                endpoints: {}
-            };
-            // v1.8.1：/api/getuserinfo 已于 2026-11 下线（实测 401 旧版错误页），改为采集 dashboard 的 RSC 数据
-            try { report.endpoints.dashboardRSC = await API.getDashboardData(true); } catch (e) { report.endpoints.dashboardRSC = { error: e.message }; }
-            try { report.endpoints.dapi511 = await fetchDAPI(511); } catch (e) { report.endpoints.dapi511 = { error: e.message }; }
-            // options=613 的 counters 恒为 null（实测），不再重复采集；领取动作 ID 才是排障关键
-            try { report.endpoints.claimActionId = await API.getClaimActionId(); } catch (e) { report.endpoints.claimActionId = { error: e.message }; }
-            try { report.endpoints.rewardsInfo = await API.getRewardsInfo(); } catch (e) { report.endpoints.rewardsInfo = { error: e.message }; }
-            try { report.endpoints.balance = await API.getBalance(); } catch (e) { report.endpoints.balance = { error: e.message }; }
-            try {
-                const earnHtml = (await Utils.xhr({ url: "https://rewards.bing.com/earn" }) || "").replace(/\\"/g, '"');
-                report.endpoints.earnPage = {
-                    pointsCounters: parseBlock(grabBlock(earnHtml, "pointsCounters")),
-                    pointsHistory: parseBlock(grabBlock(earnHtml, "pointsHistory")),
-                    todayFields: scanTodayFields(earnHtml)
-                };
-            } catch (e) {
-                report.endpoints.earnPage = { error: e.message };
-            }
-            try {
-                const dashboardHtml = (await Utils.xhr({ url: "https://rewards.bing.com/dashboard" }) || "").replace(/\\"/g, '"');
-                const plainText = dashboardHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
-                report.endpoints.dashboardPage = {
-                    pointsCounters: parseBlock(grabBlock(dashboardHtml, "pointsCounters")),
-                    pointsHistory: parseBlock(grabBlock(dashboardHtml, "pointsHistory")),
-                    todayFields: scanTodayFields(dashboardHtml),
-                    claimableText: (plainText.match(/.{0,60}(?:可领取|待领取|to claim).{0,60}/i) || [""])[0],
-                    serverActions: Object.keys(await API.resolveServerActions(dashboardHtml))
-                };
-            } catch (e) {
-                report.endpoints.dashboardPage = { error: e.message };
-            }
-            // 旧版 /api/reportactivity 已于 2026-11 下线（实测 POST 401），不再探测
-            try {
-                const searchHtml = String(await API.getSearchPage("rewards probe", false) || "");
-                report.endpoints.searchProbe = {
-                    length: searchHtml.length,
-                    hasResults: /b_results|b_algo/i.test(searchHtml),
-                    hasLogin: /_Rwho|SignOut|userinfo|Rewards/i.test(searchHtml),
-                    head: searchHtml.slice(0, 300)
-                };
-            } catch (e) {
-                report.endpoints.searchProbe = { error: e.message };
-            }
-
-            const json = JSON.stringify(sanitize(report), null, 2);
-            // 后台 service worker 无 DOM 时，统一走剪贴板 + 通知
-            const copied = Utils.copyText(json);
-            GM_setValue("Config.lastDebugInfo", json);
-            const panel = Utils.showTextPanel("🧪 诊断数据", json);
-            // 与旧版一致：页面上下文用原生弹框明确提示复制结果
-            try {
-                Utils.safeAlert(copied ? "✅ 诊断数据已复制到剪贴板，请直接粘贴。" : "⚠️ 自动复制失败，请在面板中点击「复制全部」。");
-            } catch (_) {}
-            if (!panel) {
-                GM_setValue("Config.pendingDebugView", true);
-                try { GM_openInTab("https://rewards.bing.com/earn", { active: true }); } catch (_) {}
-                try {
-                    GM_notification({
-                        title: copied ? "🧪 诊断数据已复制" : "🧪 诊断数据",
-                        text: copied ? "请直接粘贴到对话中" : "剪贴板不可用，已打开页面展示"
-                    });
-                } catch (_) {}
-            }
-        } catch (e) {
-            try { Utils.safeAlert(`⚠️ 诊断数据采集失败：${e.message}`); } catch (_) {
-                try { GM_notification({ title: "🧪 诊断数据采集失败", text: e.message }); } catch (_) {}
-            }
-        }
-    }
-
-    // 菜单注册：诊断相关收成一个入口，避免「调试信息」与「导出诊断数据」两个近似项并列
-    GM_registerMenuCommand("🔧 诊断信息", async () => {
-        const choice = Utils.safePrompt(
-            "🔧 诊断信息\n"
-            + "==================\n\n"
-            + "1 = 查看运行调试信息（账号/任务/接口状态，查看后可复制）\n"
-            + "2 = 导出完整诊断 JSON（含各接口原始字段，排障时用）\n"
-            + "0 = 退出"
-        );
-        // 后台上下文（ScriptCat 的菜单常在无 DOM 的上下文执行）拿不到弹窗时默认走「查看调试信息」，
-        // 该分支自带降级：复制到剪贴板 + 系统通知 + 打开 rewards 页展示
-        const raw = choice === null || choice === undefined ? "" : String(choice).trim();
-        const num = raw || (typeof document === "undefined" ? "1" : "");
-        if (!num || num === "0") return;
-        if (num === "1") { await showDebugInfo(); return; }
-        if (num === "2") { await exportDiagnostics(); return; }
-        Utils.safeAlert("无效的编号！");
+        } catch (_) {}
+        Utils.log("🟡", "当前脚本猫版本不支持直接打开设置页：请点扩展图标 → 本脚本 → 设置", true);
     });
 
-    const updateBroMenu = () => {
-        const enabled = GM_getValue("Notice.bro", true);
-        return enabled ? "🔕 关闭浏览器通知" : "🔔 开启浏览器通知";
-    };
-    GM_registerMenuCommand(updateBroMenu(), () => {
-        const current = GM_getValue("Notice.bro", true);
-        GM_setValue("Notice.bro", !current);
-        Utils.safeAlert(`浏览器通知已${!current ? "开启" : "关闭"}`);
-        Utils.safeReload();
+    GM_registerMenuCommand("🔔 浏览器通知开关", () => {
+        const next = !GM_getValue("Notice.bro", true);
+        GM_setValue("Notice.bro", next);
+        Utils.log(next ? "🔔" : "🔕", `浏览器通知已${next ? "开启" : "关闭"}`, true);
     });
-
-    /**
-     * 跨上下文查看调试信息：后台菜单无 DOM 时，打开本页面后在此渲染
-     */
-    if (typeof document !== "undefined" && GM_getValue("Config.pendingDebugView", false)) {
-        GM_setValue("Config.pendingDebugView", false);
-        /**
-         * 渲染上次保存的调试文本
-         */
-        const renderPendingDebug = () => {
-            Utils.showTextPanel(
-                "🔧 调试信息",
-                GM_getValue("Config.lastDebugInfo", "（暂无调试信息）"),
-                GM_getValue("Config.pendingDebugNote", "")
-            );
-        };
-        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderPendingDebug);
-        else renderPendingDebug();
-    }
 
     const init = () => {
         // 兜底：万一当前环境不支持 GM_addValueChangeListener（面板写入无回调），
@@ -4846,7 +4359,7 @@ Notice:
                     if (backup) GM_setValue("Config.token", backup);
                 }
                 GM_setValue("Config.tokenBackup", false);
-                Utils.log("🔴", "授权码捕获成功但 Token 交换失败，请复制地址栏 URL 到「📋 粘贴授权码」重试，或重新点击「🔑 手动授权」");
+                Utils.log("🔴", "授权码捕获成功但 Token 交换失败，请复制地址栏 URL 到「⌨️ 粘贴授权码」重试，或重新点击「🔑 手动授权」");
             }
         })();
     } else if (!isBingSearchPage) {
