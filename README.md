@@ -8,6 +8,7 @@
 > **v3.0.0 是单文件后台脚本**：参数全部收进脚本猫原生设置面板，不再需要（也不提供）任何配套的「控制台」页面脚本。
 
 ---
+##❗️❗️❗️注意：实测发现有一个日常活动任务需手动点击，昨晚修到三点多发现还是行不通，涉及到每日签到任务和升级任务，特此提示。
 
 ## ✨ 功能特性
 
@@ -75,34 +76,6 @@
 | ⚙️ 打开设置（参数都在这里） | 打开脚本猫原生 UserConfig 表单 | 所有可调参数都在这里 |
 | 🔔 浏览器通知开关 | 翻转 `Notice.bro` | 结果用通知回执 |
 
-## 🧩 工作原理（模块速览）
-
-| 模块 | 职责 |
-| --- | --- |
-| 元数据头 | `@connect` 声明微软业务域、热词接口域与 pushplus.plus；`@match` 覆盖 OAuth 回调页与 Bing/Rewards 页面 |
-| UserConfig | 设置面板三组配置，与菜单读写同一批存储键 |
-| 登录回调捕获 | 在 `oauth20_desktop.srf` 截获 OAuth code，兑换并续期 access token |
-| RewardsAuto | UA / offerId / 搜索词池 / 跳过规则等常量与运行状态（含兜底的领取 action id） |
-| PushPlus | 推送配置读取与就绪判定（endpoint、token、开关） |
-| Utils | 缓存（TTL+单飞）、三通道 `log()`、通知状态按日去重、`sendPushPlus()`、带退避重试的 `xhr()`（v3.0 已删除依赖 DOM 的 `safeAlert/safePrompt/safeConfirm/safeReload/showTextPanel/copyText`） |
-| API 层 | token 生命周期、**dashboard 服务端渲染解析**（余额/等级/连签/待领取）、DAPI 511 字段适配、阅读与卡片（Server Action 动态解析）、搜索（热词 + 配额）、区域检查 |
-| 自动领取 | 两跳定位懒加载 chunk 里的 `reportClaimAllPoints` action id → `POST /dashboard`（`Next-Action` 头 + `[]`）→ 余额复核 |
-| TaskManager | 运行锁、完成调度、七项任务执行、报表汇总、收尾推送 |
-| 菜单系统 | v3.0 重写：只剩授权 / 粘贴授权码 / 状态 / 立即运行 / 打开设置 / 通知开关，全部不依赖 DOM 与 prompt |
-| init | crontab 注册；Bing 搜索页跳过初始化；登录回调页立即兑换 token |
-
-## 🗂️ 文件结构
-
-```
-scriptcat-ms-rewards/
-├── 微软bing rewards积分获取（持续优化版）.user.js   # 主脚本（直接导入脚本猫）
-├── script.options.json                 # 脚本猫选项元数据（含 @connect 声明）
-├── script.storage.json                 # 存储快照示例（令牌已脱敏置空）
-├── 主页实测与改进清单.md                # 2026-11 新版站点实测证据与 16 项改进清单
-├── 参考脚本对比与采纳建议.md            # 与商店同类脚本（7354/8787/8491）的能力差与采纳路线
-└── README.md
-```
-
 ## 🔐 安全说明
 
 - 微软登录凭据（access token）仅保存在本机脚本猫存储中，**不会**出现在本仓库；
@@ -123,6 +96,8 @@ scriptcat-ms-rewards/
 - 🔌 **新增 `@grant CAT_registerMenuInput` / `CAT_userConfig`**，补 `@connect 3g.qq.com`（`getIPInfo()` 的 referer 域名，此前静态检查一直报 connect 缺失）。
 - 📉 **脚本体积 273166B → 246582B（-9.7%），4858 行 → 4369 行（-489 行）**；业务逻辑（签到 / 阅读 / 活动 / 搜索 / 桌面周任务 / 领分 / 推送 / 运行锁 / Token 生命周期）**一行未改**。
 - ⚠️ **行为变化**：原先点「🔧 诊断信息」导出的 JSON、点「📊 运行状态」看到的弹窗，现在都不再出现；排查问题改用脚本日志 + 浏览器通知，或临时把 `Config.debugLog` 打开看环形缓冲。
+
+### v2.X（尝试为脚本重构一个UI面板，发现与后台响应模块冲突，删了）
 
 ### v1.8.6（代码整理：删死代码 + 合并重复实现）
 
